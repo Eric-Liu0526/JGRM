@@ -1,0 +1,9 @@
+# 工程项目相关
+__pycache__/
+logs/
+
+# 数据相关
+dataset/
+
+# 模型相关
+research/
