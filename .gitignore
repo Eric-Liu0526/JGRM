@@ -4,6 +4,9 @@ logs/
 
 # 数据相关
 dataset/
+output.csv
+boundary.txt
+preprocess_log.txt
 
 # 模型相关
 research/

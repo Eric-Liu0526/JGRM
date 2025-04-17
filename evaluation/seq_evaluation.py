@@ -1,5 +1,5 @@
 import sys
-sys.path.append(".")
+sys.path.append("..")
 
 import numpy as np
 import pandas as pd
@@ -24,17 +24,17 @@ def evaluation(city, exp_path, model_name, start_time):
     embedding_name = model_name.split('.')[0]
 
     # load task 1 & task2 label
-    feature_df = pd.read_csv("/data/mazp/dataset/JMTR/didi_{}/edge_features.csv".format(city))
+    feature_df = pd.read_csv("../dataset/didi_{}/edge_features.csv".format(city))
     num_nodes = len(feature_df)
     print("num_nodes:", num_nodes)
 
     # load adj
-    edge_index = np.load("/data/mazp/dataset/JMTR/didi_{}/line_graph_edge_idx.npy".format(city))
+    edge_index = np.load("../dataset/didi_{}/line_graph_edge_idx.npy".format(city))
     print("edge_index shape:", edge_index.shape)
 
     #
     test_node_data = pickle.load(
-        open('/data/mazp/dataset/JMTR/didi_{}/{}_1101_1115_data_sample10w.pkl'.format(city, city), 'rb')) # data_seq_evaluation.pkl
+        open('../dataset/didi_{}/{}_1101_1115_data_sample10w.pkl'.format(city, city), 'rb')) # data_seq_evaluation.pkl
 
     road_list = get_road(test_node_data)
     print('number of road obervased in test data: {}'.format(len(road_list)))
@@ -57,7 +57,7 @@ def evaluation(city, exp_path, model_name, start_time):
 
     # prepare sequence task
     test_seq_data = pickle.load(
-        open('/data/mazp/dataset/JMTR/didi_{}/{}_1101_1115_data_seq_evaluation.pkl'.format(city, city),
+        open('../dataset/didi_{}/{}_1101_1115_data_seq_evaluation.pkl'.format(city, city),
              'rb'))
     test_seq_data = test_seq_data.sample(50000, random_state=0)
 
@@ -86,9 +86,9 @@ def evaluation(city, exp_path, model_name, start_time):
     # sim_srh.evaluation2(seq_embedding, None, seq_model, test_seq_data, num_nodes, detour_base, feature_df,
     #                     detour_rate=0.15, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
 
-    geometry_df = pd.read_csv("/data/mazp/dataset/JMTR/didi_{}/edge_geometry.csv".format(city))
+    geometry_df = pd.read_csv("../dataset/didi_{}/edge_geometry.csv".format(city))
 
-    trans_mat = np.load('/data/mazp/dataset/JMTR/didi_{}/transition_prob_mat.npy'.format(city))
+    trans_mat = np.load('../dataset/didi_{}/transition_prob_mat.npy'.format(city))
     trans_mat = torch.tensor(trans_mat)
 
     sim_srh.evaluation3(seq_embedding, None, seq_model, test_seq_data, num_nodes, trans_mat, feature_df, geometry_df,
@@ -100,13 +100,13 @@ def evaluation(city, exp_path, model_name, start_time):
 if __name__ == '__main__':
 
     city = 'chengdu'
-    exp_path = '/data/mazp/exp/JTMR_xian_230824094211'
-    model_name = 'JTMR_xian_v1_20_100000_230824094211_19.pt'
+    exp_path = '../research/exp/JTMR_chengdu_250414162721'
+    model_name = 'JTMR_chengdu_v1_20_100000_250414162721_19.pt'
 
     start_time = time.time()
     log_path = os.path.join(exp_path, 'evaluation')
-    # sys.stdout = Logger(log_path, start_time, stream=sys.stdout)  # record log
-    # sys.stderr = Logger(log_path, start_time, stream=sys.stderr)  # record error
+    sys.stdout = Logger(log_path, start_time, stream=sys.stdout)  # record log
+    sys.stderr = Logger(log_path, start_time, stream=sys.stderr)  # record error
 
     evaluation(city, exp_path, model_name, start_time)
 

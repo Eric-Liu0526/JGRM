@@ -277,3 +277,61 @@ class IntervalEmbedding(nn.Module):
         logit = self.activation(self.layer1(x.unsqueeze(-1)))
         output = logit @ self.emb.weight
         return output
+
+class SeqGATLayer(nn.Module):
+    def __init__(self, in_feats, out_feats, num_heads=1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.out_feats = out_feats
+        
+        self.W = nn.Linear(in_feats, out_feats * num_heads)
+        self.attn = nn.Parameter(torch.Tensor(1, num_heads, out_feats * 2))
+        self.w_embed = nn.Linear(1, num_heads)
+        nn.init.xavier_uniform_(self.attn)
+
+    def forward(self, X, A):
+        N, L, F = X.shape
+        X_proj = self.W(X).view(N, L, self.num_heads, self.out_feats).permute(0, 2, 1, 3)
+        outputs = []
+
+        for i in range(N):
+            h_i = X_proj[i]  # (num_heads, L, out_feats)
+            h_i_pooled = h_i.mean(dim=1)
+
+            neighbors = A[i].nonzero().squeeze(1)
+            msgs = []
+
+            for j in neighbors:
+                h_j = X_proj[j]  # (num_heads, L, out_feats)
+                h_j_pooled = h_j.mean(dim=1)
+
+                attn_input = torch.cat([h_i_pooled, h_j_pooled], dim=-1)
+                e_ij = F.leaky_relu((attn_input * self.attn).sum(dim=-1))
+
+                w_ij = A[i, j].unsqueeze(0).unsqueeze(-1)  # shape: (1, 1)
+                w_embed = self.w_embed(w_ij).squeeze(0)  # shape: (num_heads)
+                e_ij += w_embed
+
+                α_ij = F.softmax(e_ij, dim=0)
+                msg = α_ij.view(-1, 1, 1) * h_j
+                msgs.append(msg)
+
+            h_new = sum(msgs)
+            outputs.append(h_new)
+
+        out = torch.stack(outputs).permute(0, 2, 1, 3).reshape(N, L, -1)
+        return out
+    
+class SeqGATBatch(nn.Module):
+    def __init__(self, in_feats, out_feats, num_heads=1):
+        super().__init__()
+        self.seqgat = SeqGATLayer(in_feats, out_feats, num_heads)
+
+    def forward(self, X_batch, A_batch):
+        # X_batch: (B, N, L, F), A_batch: (B, N, N)
+        B = X_batch.shape[0]
+        outputs = []
+        for b in range(B):
+            out_b = self.seqgat(X_batch[b], A_batch[b])  # (N, L, F')
+            outputs.append(out_b)
+        return torch.stack(outputs)  # shape: (B, N, L, F')

@@ -12,7 +12,19 @@ import torch.nn.utils.rnn as rnn_utils
 import pickle
 import pandas as pd
 import json
+from torch.utils.data import BatchSampler
 
+class CustomBatchSampler(BatchSampler):
+    def __init__(self, batch_indices_list):
+        self.batch_indices = batch_indices_list
+
+    def __iter__(self):
+        for batch in self.batch_indices:
+            yield batch
+
+    def __len__(self):
+        return len(self.batch_indices)
+    
 def extract_weekday_and_minute_from_list(timestamp_list):
     weekday_list = []
     minute_list = []
@@ -204,6 +216,7 @@ class StaticDataset(Dataset):
 #     def __getitem__(self, idx):
 #         return (self.x_mbr[idx],self.x_c[idx],self.label_idxs[idx],self.lengths[idx])
 
+'''
 def get_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed):
 
     dataset = pickle.load(open(data_path, 'rb'))
@@ -231,7 +244,7 @@ def get_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, 
     dataset['flag'] = pd.to_datetime(dataset['start_time'], unit='s').dt.day
     # 前13天作为训练集，第14天作为测试集，第15天作为验证集
     train_data, test_data, val_data =dataset[dataset['flag']<14], dataset[dataset['flag']==14], dataset[dataset['flag']==15]
-    train_data = train_data.sample(n=num_samples, replace=False, random_state=seed)
+    # train_data = train_data.sample(n=num_samples, replace=False, random_state=seed)
 
     # notice: 一般情况下
 
@@ -239,11 +252,27 @@ def get_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, 
     test_dataset = StaticDataset(test_data, mat_padding_value, data_padding_value,gps_max_len,route_max_len)
     val_dataset = StaticDataset(val_data, mat_padding_value, data_padding_value,gps_max_len,route_max_len)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
+    batch_sampler = CustomBatchSampler(split_batches(batch_size))
+    train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler, num_workers=num_worker)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
 
     return train_loader, val_loader, test_loader
+'''
+
+def split_batches(batch_size=32):
+    batches = []
+    with open(f'dataset/didi_chengdu/sub_g_traj_dict_1.pkl', 'rb') as f:
+        sub_g_traj_dict = pickle.load(f)
+    for sub_g_id, traj_set in sub_g_traj_dict.items():
+        traj_list = list(traj_set)
+        for i in range(0, len(traj_list), batch_size):
+            split_list = traj_list[i:i+batch_size]
+            if len(split_list) == batch_size:
+                batches.append(split_list)
+    return batches
+
 
 def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed):
 
@@ -272,11 +301,13 @@ def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max
 
     # 前13天作为训练集，第14天作为测试集，第15天作为验证集，已经提前分好
     train_data = dataset
-    train_data = train_data.sample(n=num_samples, replace=False, random_state=seed)
+    # train_data = train_data.sample(n=num_samples, replace=False, random_state=seed)
 
     train_dataset = StaticDataset(train_data, mat_padding_value, data_padding_value,gps_max_len,route_max_len)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
+    batch_sampler = CustomBatchSampler(split_batches(batch_size))
+    train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler, num_workers=num_worker)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
 
     return train_loader
 
