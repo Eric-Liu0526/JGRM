@@ -57,6 +57,9 @@ class JGRMModel(BaseModel):
         self.image_queue = nn.functional.normalize(self.gps_queue, dim=0)
         self.text_queue = nn.functional.normalize(self.route_queue, dim=0)
 
+        # GNN层的初始化
+        self.gnn_layer = SeqGATBatch(in_feats=road_embed_size, out_feats=hidden_size, num_heads=4)
+
     def encode_graph(self, drop_rate=0.):
         node_emb = self.node_embedding.weight
         edge_index = dropout_adj(self.edge_index, p=drop_rate)[0]
@@ -179,7 +182,7 @@ class JGRMModel(BaseModel):
 
         return flattened_gps_data, route_index
 
-    def encode_joint(self, route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat):
+    def encode_joint(self, route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat, trajg_adj):
         max_len = torch.max((route_assign_mat!=self.vocab_size).int().sum(1)).item()
         max_len = max_len*2+2
         data_list = []
@@ -219,10 +222,22 @@ class JGRMModel(BaseModel):
 
         joint_data = rnn_utils.pad_sequence(data_list, padding_value=0, batch_first=True)
         mask_mat = rnn_utils.pad_sequence(mask_list, padding_value=True, batch_first=True)
-
+        
+        # 经过 GNN 增强轨迹表示
         joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
+      
+        # 在这里引入 GNN 增强
+        gnn_emb = self.gnn_layer(joint_emb, trajg_adj)  # (B, N, L, F')
 
         # 每一行的0 和 length+1 对应的是 gps_traj_rep 和 route_traj_rep
+        gps_traj_rep = gnn_emb[:, 0]
+        route_traj_rep = torch.stack([gnn_emb[i, length + 1] for i, length in enumerate(route_length)], dim=0)
+
+        gps_road_rep = rnn_utils.pad_sequence([gnn_emb[i, 1:length + 1] for i, length in enumerate(route_length)],
+                                              padding_value=0, batch_first=True)
+        route_road_rep = rnn_utils.pad_sequence([gnn_emb[i, length + 2:2 * length + 2] for i, length in enumerate(route_length)],
+                                                padding_value=0, batch_first=True)
+        '''
         gps_traj_rep = joint_emb[:, 0]
         route_traj_rep = torch.stack([joint_emb[i, length+1] for i, length in enumerate(route_length)], dim=0)
 
@@ -230,15 +245,16 @@ class JGRMModel(BaseModel):
                                               padding_value=0, batch_first=True)
         route_road_rep = rnn_utils.pad_sequence([joint_emb[i, length+2:2*length+2] for i, length in enumerate(route_length)],
                                                 padding_value=0, batch_first=True)
+        '''                                          
 
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep
 
-    def forward(self, route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length):
+    def forward(self, route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, trajg_adj):
         gps_road_rep, gps_traj_rep = self.encode_gps(gps_data, masked_gps_assign_mat, masked_route_assign_mat, gps_length)
         route_road_rep, route_traj_rep = self.encode_route(route_data, route_assign_mat, masked_route_assign_mat)
         gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep = self.encode_joint(route_road_rep, route_traj_rep,
                                                                                         gps_road_rep, gps_traj_rep,
-                                                                                        route_assign_mat)
+                                                                                        route_assign_mat, trajg_adj)
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
                gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep
 
@@ -328,10 +344,19 @@ class SeqGATBatch(nn.Module):
         self.seqgat = SeqGATLayer(in_feats, out_feats, num_heads)
 
     def forward(self, X_batch, A_batch):
-        # X_batch: (B, N, L, F), A_batch: (B, N, N)
-        B = X_batch.shape[0]
+        # X_batch: (B, N, L, F) -> B 个子图，每个子图有 N 个节点，L 是时间步长，F 是特征数
+        # A_batch: (B, N, N) -> 每个子图的邻接矩阵
+
+        B = X_batch.shape[0]  # batch size
         outputs = []
+        
         for b in range(B):
-            out_b = self.seqgat(X_batch[b], A_batch[b])  # (N, L, F')
+            # 对于每个批次的输入，获取相应子图的邻接矩阵
+            A = A_batch[b]  # 每个子图的邻接矩阵，形状 (N_i, N_i)
+            X = X_batch[b]  # 每个子图的特征矩阵，形状 (N_i, L, F)
+
+            # 这里就传入单图的 GAT 层处理当前批次
+            out_b = self.seqgat(X, A)  # (N, L, F')
             outputs.append(out_b)
-        return torch.stack(outputs)  # shape: (B, N, L, F')
+
+        return torch.stack(outputs)  # 返回形状 (B, N, L, F')

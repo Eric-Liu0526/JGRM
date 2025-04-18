@@ -12,7 +12,7 @@
   "route_max_len": 100,
   "gps_min_len": 10,
   "gps_max_len": 256,
-  "num_epochs": 20,
+  "num_epochs": 30,
   "learning_rate": 3e-3,
   "warmup_step": 1000,
   "weight_decay": 1e-6,

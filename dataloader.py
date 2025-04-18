@@ -13,6 +13,9 @@ import pickle
 import pandas as pd
 import json
 from torch.utils.data import BatchSampler
+import random
+import networkx as nx
+from typing import List, Iterator
 
 class CustomBatchSampler(BatchSampler):
     def __init__(self, batch_indices_list):
@@ -138,6 +141,7 @@ class StaticDataset(Dataset):
         # 仅包含gps轨迹和route轨迹，route中包含路段的特征
         # 不包含路段过去n个时间戳的流量数据
         self.data = data
+        self.traj_idx = data.index
         gps_length = data['opath_list'].apply(lambda opath_list: self._split_duplicate_subseq(opath_list, data['route_length'].max())).tolist()
         self.gps_length = torch.tensor(gps_length, dtype=torch.int)
         gps_data, gps_assign_mat = prepare_gps_data(data[['opath_list', 'tm_list',\
@@ -179,7 +183,7 @@ class StaticDataset(Dataset):
 
     def __getitem__(self, idx):
         return (self.gps_data[idx], self.gps_assign_mat[idx], self.route_data[idx], self.route_assign_mat[idx],
-                self.gps_length[idx])
+                self.gps_length[idx], self.traj_idx[idx])
 
 # class DynamicDataset_(Dataset):
 #     def __init__(self, data, edge_features, traffic_flow_history):
@@ -261,17 +265,94 @@ def get_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, 
     return train_loader, val_loader, test_loader
 '''
 
-def split_batches(batch_size=32):
+def sample_batch(graph, batch_size):
+    """
+    从图中进行邻居采样，生成一个batch。
+
+    Args:
+        graph (networkx.Graph): 当前子图。
+        batch_size (int): 每个批次需要采样的节点数量。
+
+    Returns:
+        sub_batch (list): 当前批次的节点ID列表。
+        node_features (torch.Tensor): 当前批次节点的特征矩阵。
+        adj_matrix (torch.Tensor): 当前批次的邻接矩阵。
+    """
+    # 1. 随机选择batch_size个节点
+    nodes = list(graph.nodes)
+    sampled_nodes = random.sample(nodes, batch_size)
+    
+    # 2. 为每个采样的节点选择邻居（你可以选择固定数量的邻居）
+    #    这里我们简单地采样每个节点的所有邻居，也可以加一些采样技巧来限制邻居的数量
+    subgraph_nodes = set(sampled_nodes)  # 初步选择的子图节点集合
+    for node in sampled_nodes:
+        neighbors = list(graph.neighbors(node))  # 获取邻居
+        subgraph_nodes.update(neighbors)  # 将邻居加入子图节点集合
+
+    # 3. 创建子图
+    subgraph = graph.subgraph(subgraph_nodes)
+    
+    # 4. 获取子图的邻接矩阵
+    adj_matrix = nx.to_numpy_matrix(subgraph)  # 邻接矩阵（numpy）
+    adj_matrix = torch.tensor(adj_matrix, dtype=torch.float32)  # 转为Tensor
+    
+    # 5. 获取节点特征
+    # 假设每个节点都有一个 'feature' 属性，返回每个节点的特征
+    node_features = []
+    for node in subgraph_nodes:
+        feature = graph.nodes[node].get('feature', torch.zeros(1))  # 这里可以替换为节点的实际特征
+        node_features.append(feature)
+    
+    node_features = torch.stack(node_features)  # 转为Tensor，维度 (num_nodes, feature_dim)
+    
+    return sampled_nodes, node_features, adj_matrix
+
+def random_batch_nodes(graph: nx.Graph, batch_size: int) -> List[List]:
+    """
+    将图的节点随机划分为多个batch，每个batch大小为batch_size，尽可能覆盖所有节点。
+    
+    参数:
+        graph (nx.Graph): 输入的networkx图
+        batch_size (int): 每个batch的节点数量
+        
+    返回:
+        List[List]: 包含多个batch的列表，每个batch是节点ID的列表
+    """
+    # 获取图中所有节点的列表
+    nodes = list(graph.nodes())
+    np.random.shuffle(nodes)  # 随机打乱节点顺序
+    
     batches = []
-    with open(f'dataset/didi_chengdu/sub_g_traj_dict_1.pkl', 'rb') as f:
-        sub_g_traj_dict = pickle.load(f)
-    for sub_g_id, traj_set in sub_g_traj_dict.items():
-        traj_list = list(traj_set)
-        for i in range(0, len(traj_list), batch_size):
-            split_list = traj_list[i:i+batch_size]
-            if len(split_list) == batch_size:
-                batches.append(split_list)
+    for i in range(0, len(nodes), batch_size):
+        batch = nodes[i:i + batch_size]  # 切片获取当前batch
+        if len(batch) == batch_size:
+            batches.append(batch)
+    
     return batches
+
+def split_batches(batch_size=32):
+    batch2g_dict = dict()
+    batches = []
+    # 读取子图轨迹字典：{sub_g_id: traj_set}
+    with open(f'dataset/didi_chengdu/sub_g_traj_dict.pkl', 'rb') as f:
+        sub_g_traj_dict = pickle.load(f)
+    # 通过子图采样划分训练batch
+    for sub_g_id in sub_g_traj_dict.keys():
+        graph = pickle.load(open(f'dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
+        # sub_batches = sample_batch(graph, batch_size)
+        sub_batches = random_batch_nodes(graph, batch_size)
+        for sub_batch in sub_batches:
+            batch2g_dict[len(batch2g_dict)] = sub_g_id
+            batches.append(sub_batch)
+    return batch2g_dict, batches
+
+    # for sub_g_id, traj_set in sub_g_traj_dict.items():
+    #     traj_list = list(traj_set)
+    #     for i in range(0, len(traj_list), batch_size):
+    #         split_list = traj_list[i:i+batch_size]
+    #         if len(split_list) == batch_size:
+    #             batches.append(split_list)
+    # return batches
 
 
 def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed):
@@ -286,6 +367,7 @@ def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max
     dataset['gps_length'] = dataset['opath_list'].map(len)
     dataset = dataset[
         (dataset['gps_length'] > gps_min_len) & (dataset['gps_length'] < gps_max_len)].reset_index(drop=True)
+    
 
     print(dataset.shape)
     print(num_samples)
@@ -304,12 +386,12 @@ def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max
     # train_data = train_data.sample(n=num_samples, replace=False, random_state=seed)
 
     train_dataset = StaticDataset(train_data, mat_padding_value, data_padding_value,gps_max_len,route_max_len)
-
-    batch_sampler = CustomBatchSampler(split_batches(batch_size))
+    batch2g_dict, batches = split_batches(batch_size)
+    batch_sampler = CustomBatchSampler(batches)
     train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler, num_workers=num_worker)
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last=True, num_workers=num_worker)
 
-    return train_loader
+    return batch2g_dict, train_loader
 
 def random_mask(gps_assign_mat, route_assign_mat, gps_length, mask_token, mask_length=1, mask_prob=0.2):
 

@@ -87,7 +87,7 @@ def finetune(config):
     if not os.path.exists(log_path):
         os.makedirs(log_path)
     writer = SummaryWriter(log_path)
-    train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
+    _, train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
     print('dataset is ready.')
 
     epoch_step = train_loader.dataset.route_data.shape[0] // batch_size

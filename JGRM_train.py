@@ -11,13 +11,17 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from JGRM import JGRMModel
 from cl_loss import get_traj_match_loss
-from dcl import DCL
 import os
+import pickle as pkl
+import networkx as nx
 
-dev_id = 0
-os.environ['CUDA_VISIBLE_DEVICES'] = str(dev_id)
+
+dev_id = 1
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
+print("PS:batch通过随机采样")
+# print("PS:加上图增强")
 
 def train(config):
 
@@ -63,6 +67,15 @@ def train(config):
     # define seed
     setup_seed(seed)
 
+    sub_g_dict = dict()
+    # 读取子图轨迹字典：{sub_g_id: traj_set}
+    with open(f'dataset/didi_chengdu/sub_g_traj_dict.pkl', 'rb') as f:
+        sub_g_traj_dict = pkl.load(f)
+    # 通过子图采样划分训练batch
+    for sub_g_id in sub_g_traj_dict.keys():
+        graph = pkl.load(open(f'dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
+        sub_g_dict[sub_g_id] = graph
+
     # define model, parmeters and optimizer
     edge_index = np.load(adj_path)
     model = JGRMModel(vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num,
@@ -96,7 +109,7 @@ def train(config):
     else:
         model.apply(weight_init)
 
-    train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
+    batch2g_dict, train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
     print('dataset is ready.')
 
     epoch_step = train_loader.dataset.route_data.shape[0] // batch_size
@@ -106,7 +119,13 @@ def train(config):
     for epoch in range(num_epochs):
         model.train()
         for idx, batch in enumerate(train_loader):
-            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length = batch
+            batchg_id = batch2g_dict[idx]
+            trajg_adj = nx.adjacency_matrix(sub_g_dict[batchg_id])
+            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, traj_idx = batch
+
+            # batch_graph邻接矩阵
+            batchg = sub_g_dict[batchg_id].subgraph(traj_idx).copy()
+            batchg_adj = nx.adjacency_matrix(batchg, nodelist=traj_idx)
 
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
                                                                          vocab_size, mask_length, mask_prob)
@@ -116,7 +135,7 @@ def train(config):
 
             gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
             gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep \
-                = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length)
+                = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, batchg_adj)
 
             # flatten road_rep
             mat2flatten = {}
