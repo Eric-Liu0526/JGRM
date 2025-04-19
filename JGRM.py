@@ -4,6 +4,7 @@ from torch_geometric.utils import dropout_adj
 from torch_geometric.nn import GATConv
 from basemodel import BaseModel
 import torch.nn.utils.rnn as rnn_utils
+import torch.nn.functional as F
 
 class JGRMModel(BaseModel):
     def __init__(self, vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num, gps_embed_size, route_embed_size, hidden_size, edge_index, drop_edge_rate, drop_route_rate, drop_road_rate, mode='p'):
@@ -58,7 +59,7 @@ class JGRMModel(BaseModel):
         self.text_queue = nn.functional.normalize(self.route_queue, dim=0)
 
         # GNN层的初始化
-        self.gnn_layer = SeqGATBatch(in_feats=road_embed_size, out_feats=hidden_size, num_heads=4)
+        self.gnn_layer = SeqGATBatch(in_feats=hidden_size, out_feats=hidden_size, num_heads=4)
 
     def encode_graph(self, drop_rate=0.):
         node_emb = self.node_embedding.weight
@@ -225,9 +226,11 @@ class JGRMModel(BaseModel):
         
         # 经过 GNN 增强轨迹表示
         joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
-      
+        
+        # tag:图增强
+                   
         # 在这里引入 GNN 增强
-        gnn_emb = self.gnn_layer(joint_emb, trajg_adj)  # (B, N, L, F')
+        gnn_emb = self.gnn_layer(joint_emb, trajg_adj)  # (B, N, L, feat')
 
         # 每一行的0 和 length+1 对应的是 gps_traj_rep 和 route_traj_rep
         gps_traj_rep = gnn_emb[:, 0]
@@ -245,10 +248,12 @@ class JGRMModel(BaseModel):
                                               padding_value=0, batch_first=True)
         route_road_rep = rnn_utils.pad_sequence([joint_emb[i, length+2:2*length+2] for i, length in enumerate(route_length)],
                                                 padding_value=0, batch_first=True)
-        '''                                          
+        '''                             
 
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep
 
+    # tag:图增强
+    
     def forward(self, route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, trajg_adj):
         gps_road_rep, gps_traj_rep = self.encode_gps(gps_data, masked_gps_assign_mat, masked_route_assign_mat, gps_length)
         route_road_rep, route_traj_rep = self.encode_route(route_data, route_assign_mat, masked_route_assign_mat)
@@ -257,7 +262,16 @@ class JGRMModel(BaseModel):
                                                                                         route_assign_mat, trajg_adj)
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
                gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep
-
+    '''
+    def forward(self, route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length):
+        gps_road_rep, gps_traj_rep = self.encode_gps(gps_data, masked_gps_assign_mat, masked_route_assign_mat, gps_length)
+        route_road_rep, route_traj_rep = self.encode_route(route_data, route_assign_mat, masked_route_assign_mat)
+        gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep = self.encode_joint(route_road_rep, route_traj_rep,
+                                                                                        gps_road_rep, gps_traj_rep,
+                                                                                        route_assign_mat)
+        return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
+               gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep
+    '''
 # GAT
 class GraphEncoder(nn.Module):
     def __init__(self, input_size, output_size):
@@ -299,44 +313,60 @@ class SeqGATLayer(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.out_feats = out_feats
-        
+
         self.W = nn.Linear(in_feats, out_feats * num_heads)
         self.attn = nn.Parameter(torch.Tensor(1, num_heads, out_feats * 2))
-        self.w_embed = nn.Linear(1, num_heads)
         nn.init.xavier_uniform_(self.attn)
 
+        self.w_embed = nn.Linear(1, num_heads)
+        self.proj = nn.Linear(out_feats*num_heads, out_feats)
+
     def forward(self, X, A):
-        N, L, F = X.shape
-        X_proj = self.W(X).view(N, L, self.num_heads, self.out_feats).permute(0, 2, 1, 3)
-        outputs = []
+        """
+        X: (N, L, feat)
+        A: scipy.sparse.csr_array, shape (N, N), 其中 entry(i,j) 是边的权重
+        """
+        N, L, feat = X.shape
+        device = X.device
 
-        for i in range(N):
-            h_i = X_proj[i]  # (num_heads, L, out_feats)
-            h_i_pooled = h_i.mean(dim=1)
+        # 稀疏邻接矩阵转为 COO 格式，方便逐边访问
+        A_coo = A.tocoo()
+        row, col, data = A_coo.row, A_coo.col, A_coo.data
 
-            neighbors = A[i].nonzero().squeeze(1)
-            msgs = []
+        # 映射输入特征
+        X_proj = self.W(X).view(N, L, self.num_heads, self.out_feats).permute(0, 2, 1, 3)  # (N, H, L, feat')
+        h_pooled = X_proj.mean(dim=2)  # (N, H, feat')
 
-            for j in neighbors:
-                h_j = X_proj[j]  # (num_heads, L, out_feats)
-                h_j_pooled = h_j.mean(dim=1)
+        # 初始化空消息容器
+        msgs = [torch.zeros(self.num_heads, L, self.out_feats, device=device) for _ in range(N)]
+        attn_scores = [torch.zeros(self.num_heads, device=device) for _ in range(N)]
 
-                attn_input = torch.cat([h_i_pooled, h_j_pooled], dim=-1)
-                e_ij = F.leaky_relu((attn_input * self.attn).sum(dim=-1))
+        for i, j, w_ij in zip(row, col, data):
+            w_ij = torch.tensor(w_ij, dtype=torch.float32)
+            h_i = h_pooled[i]  # (H, feat')
+            h_j = h_pooled[j]  # (H, feat')
 
-                w_ij = A[i, j].unsqueeze(0).unsqueeze(-1)  # shape: (1, 1)
-                w_embed = self.w_embed(w_ij).squeeze(0)  # shape: (num_heads)
-                e_ij += w_embed
+            # 构造注意力输入 (H, 2F')
+            attn_input = torch.cat([h_i, h_j], dim=-1)
+            e_ij = F.leaky_relu((attn_input * self.attn).sum(dim=-1))  # (H,)
 
-                α_ij = F.softmax(e_ij, dim=0)
-                msg = α_ij.view(-1, 1, 1) * h_j
-                msgs.append(msg)
+            # 融合边权重
+            w_embed = self.w_embed(torch.tensor([[w_ij]], device=device)).squeeze(0)  # (H,)
+            e_ij = e_ij + w_embed
 
-            h_new = sum(msgs)
-            outputs.append(h_new)
+            α_ij = F.softmax(e_ij, dim=0)  # 注意力归一化
 
-        out = torch.stack(outputs).permute(0, 2, 1, 3).reshape(N, L, -1)
-        return out
+            # 消息为 h_j 原始的 L 序列（不是 pooled）
+            msg = α_ij.view(-1, 1, 1) * X_proj[j]  # (H, L, feat')
+            msgs[i] += msg
+            attn_scores[i] += α_ij.view(-1)  # 保证 shape 为 [num_heads], 用于后续归一化（如果你要多头共享注意力）
+
+        # 合并所有节点的消息
+        output = torch.stack(msgs, dim=0).permute(0, 2, 1, 3).reshape(N, L, -1)
+        final_emb = self.proj(output)
+        return final_emb
+
+
     
 class SeqGATBatch(nn.Module):
     def __init__(self, in_feats, out_feats, num_heads=1):
@@ -344,19 +374,10 @@ class SeqGATBatch(nn.Module):
         self.seqgat = SeqGATLayer(in_feats, out_feats, num_heads)
 
     def forward(self, X_batch, A_batch):
-        # X_batch: (B, N, L, F) -> B 个子图，每个子图有 N 个节点，L 是时间步长，F 是特征数
-        # A_batch: (B, N, N) -> 每个子图的邻接矩阵
+        # X_batch: (N, L, feat) -> batch子图有 N 个节点，L 是时间步长，F 是特征数
+        # A_batch: (N, N) -> batch的邻接矩阵
+       
+        # 这里就传入单图的 GAT 层处理当前批次
+        output = self.seqgat(X_batch, A_batch)  # (N, L, feat')
 
-        B = X_batch.shape[0]  # batch size
-        outputs = []
-        
-        for b in range(B):
-            # 对于每个批次的输入，获取相应子图的邻接矩阵
-            A = A_batch[b]  # 每个子图的邻接矩阵，形状 (N_i, N_i)
-            X = X_batch[b]  # 每个子图的特征矩阵，形状 (N_i, L, F)
-
-            # 这里就传入单图的 GAT 层处理当前批次
-            out_b = self.seqgat(X, A)  # (N, L, F')
-            outputs.append(out_b)
-
-        return torch.stack(outputs)  # 返回形状 (B, N, L, F')
+        return output  # 返回形状 (N, L, feat')

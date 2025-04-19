@@ -1,6 +1,7 @@
 # 工程项目相关
 __pycache__/
 logs/
+code-version
 
 # 数据相关
 dataset/

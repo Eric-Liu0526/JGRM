@@ -16,12 +16,12 @@ import pickle as pkl
 import networkx as nx
 
 
-dev_id = 1
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
+dev_id = 5
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
 print("PS:batch通过随机采样")
-# print("PS:加上图增强")
+print("PS:加上图增强")
 
 def train(config):
 
@@ -124,7 +124,8 @@ def train(config):
             gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, traj_idx = batch
 
             # batch_graph邻接矩阵
-            batchg = sub_g_dict[batchg_id].subgraph(traj_idx).copy()
+            traj_idx = [tensor.item() for tensor in traj_idx]
+            batchg = sub_g_dict[batchg_id].subgraph((traj_idx)).copy()
             batchg_adj = nx.adjacency_matrix(batchg, nodelist=traj_idx)
 
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
@@ -133,10 +134,16 @@ def train(config):
             route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length =\
                 route_data.cuda(), masked_route_assign_mat.cuda(), gps_data.cuda(), masked_gps_assign_mat.cuda(), route_assign_mat.cuda(), gps_length.cuda()
 
+            # tag: 图增强
+            
             gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
             gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep \
                 = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, batchg_adj)
-
+            '''
+            gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
+            gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep \
+                = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length)
+            '''
             # flatten road_rep
             mat2flatten = {}
             y_label = []
