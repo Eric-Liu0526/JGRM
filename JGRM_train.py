@@ -14,14 +14,47 @@ from cl_loss import get_traj_match_loss
 import os
 import pickle as pkl
 import networkx as nx
+from scipy.sparse import csr_array
 
-
-dev_id = 5
+dev_id = 4
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
+print("v1.0.3")
 print("PS:batch通过随机采样")
 print("PS:加上图增强")
+print("PS:加上图损失")
+print("PS:设置注意力头为1")
+print("PS:loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + 10*graph_consistency) / 4")
+'''
+def graph_consistency_loss(original_rep, updated_rep, edge_index_csr):
+    # 将 scipy.sparse.csr_array 转换为 PyTorch 张量
+    edge_index = torch.tensor(edge_index_csr.nonzero(), dtype=torch.long)
+    
+    # 计算图结构一致性损失
+    # 使用余弦相似度来度量原始和更新节点表示之间的相似度
+    cosine_sim = F.cosine_similarity(original_rep, updated_rep, dim=-1)
+    
+    # 只考虑图中的边，即邻接节点之间的相似度
+    consistency_loss = torch.mean(1 - cosine_sim[edge_index[0]])
+    
+    return consistency_loss
+'''
+def graph_consistency_loss(original_rep, updated_rep, edge_index_csr):
+    # 提取边索引
+    row, col = edge_index_csr.nonzero()  # 邻接矩阵中有值的位置，即 (i,j) 存在边
+    row = torch.tensor(row, dtype=torch.long)
+    col = torch.tensor(col, dtype=torch.long)
+
+    # 获取边两端的节点表示
+    original_edge_sim = F.cosine_similarity(original_rep[row], original_rep[col], dim=-1)
+    updated_edge_sim = F.cosine_similarity(updated_rep[row], updated_rep[col], dim=-1)
+
+    # 相似度差异越小越好
+    loss = F.mse_loss(updated_edge_sim, original_edge_sim)
+
+    return loss
+
 
 def train(config):
 
@@ -120,7 +153,6 @@ def train(config):
         model.train()
         for idx, batch in enumerate(train_loader):
             batchg_id = batch2g_dict[idx]
-            trajg_adj = nx.adjacency_matrix(sub_g_dict[batchg_id])
             gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, traj_idx = batch
 
             # batch_graph邻接矩阵
@@ -170,6 +202,9 @@ def train(config):
             gps_traj_rep = model.gps_proj_head(gps_traj_rep)
             route_traj_rep = model.route_proj_head(route_traj_rep)
 
+            # 获取图结构一致性损失
+            graph_consistency = graph_consistency_loss(gps_road_joint_rep, route_road_joint_rep, batchg_adj)
+    
             # (GRM LOSS) get gps & route rep matching loss
             tau = 0.07
             match_loss = get_traj_match_loss(gps_traj_rep, route_traj_rep, model, batch_size, tau)
@@ -195,12 +230,13 @@ def train(config):
             route_mlm_loss = nn.CrossEntropyLoss()(masked_route_mlm_pred, y_label)
 
             # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS
-            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss) / 3
+            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + 10*graph_consistency) / 4
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)
             writer.add_scalar('mlm_loss/gps_mlm_loss', gps_mlm_loss, step)
             writer.add_scalar('mlm_loss/route_mlm_loss', route_mlm_loss, step)
+            writer.add_scalar('graph_loss/graph_loss', graph_consistency, step)
             writer.add_scalar('loss', loss, step)
 
             optimizer.zero_grad()
