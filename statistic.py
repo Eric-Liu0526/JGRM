@@ -45,9 +45,28 @@ def count_road_with_trajs(df, road_ids):
             else:
                 file.write(f'{road_id},0\n')
 
+def count_traj_degrees():
+    with open(f'dataset/didi_{dataset_name}/sub_g_traj_dict.pkl', 'rb') as file:
+        traj_dict = pickle.load(file)
+    traj_num = 0
+    for subg_id in traj_dict.keys():
+        traj_num += len(traj_dict[subg_id])
+    traj_degree = [0] * traj_num
+    for i in range(len(traj_dict)):
+        with open(f'dataset/didi_{dataset_name}/traj_subg_{i}.pkl', 'rb') as file:
+            # traj_subg是networkx.Graph对象
+            traj_subg = pickle.load(file)
+            subg_degrees = traj_subg.degree()
+            for node, degree in subg_degrees:
+                traj_degree[node] = degree
+    with open(f'logs/didi_{dataset_name}_traj_degree.pkl', 'wb') as file:
+        pickle.dump(traj_degree, file)
+
+
 
 dataset_name = 'chengdu'
-traj_file_path = f'dataset/didi_{dataset_name}/{dataset_name}_1101_1115_data_sample10w.pkl'
-road_feat_file_path = f'dataset/didi_{dataset_name}/edge_features.csv'
-data = load_data(traj_file_path)
-count_road_with_trajs(data, load_road_ids(road_feat_file_path))
+count_traj_degrees()
+# traj_file_path = f'dataset/didi_{dataset_name}/{dataset_name}_1101_1115_data_sample10w.pkl'
+# road_feat_file_path = f'dataset/didi_{dataset_name}/edge_features.csv'
+# data = load_data(traj_file_path)
+# count_road_with_trajs(data, load_road_ids(road_feat_file_path))

@@ -135,8 +135,11 @@ def evaluation(seq_embedding, task_data, num_nodes, fold=5):
     y_preds = torch.cat(fold_preds, dim=0)
     y_trues = torch.cat(fold_trues, dim=0)
     mae = mean_absolute_error(y_trues, y_preds)
+    
+    ranks = torch.argsort(abs(y_preds-y_trues)).tolist()
+
     rmse = mean_squared_error(y_trues, y_preds) ** 0.5
     print(f'travel time estimation  | MAE: {mae:.4f}, RMSE: {rmse:.4f}')
 
-    return best_epoch, best_mae, best_rmse
+    return best_epoch, best_mae, best_rmse, ranks
 

@@ -3,6 +3,10 @@ from dataloader import prepare_gps_data, prepare_route_data
 import math
 from update_road_representation import MeanAggregator, WeightedMeanAggregator
 import numpy as np
+import pickle
+import random
+import networkx as nx
+from typing import List, Iterator
 
 # 回归label标准化
 def label_norm(y):
@@ -143,7 +147,7 @@ def get_road_embedding3(road_list, gps_road_joint_rep, route_road_joint_rep, rou
     # 处理在训练时被观测到的路段
     road_joint_rep = torch.cat([gps_road_joint_rep.unsqueeze(2), route_road_joint_rep.unsqueeze(2)], dim=2)
     road_embedding = torch.zeros((seq_model.node_embedding.weight.shape[0], road_joint_rep.shape[-1])).cuda()
-    route_assign_mat = route_assign_mat[:road_joint_rep.shape[0]]
+    # route_assign_mat = route_assign_mat[:road_joint_rep.shape[0]]
     for road_id in road_list:
         indexes = torch.nonzero(route_assign_mat==road_id)
         rep_list = [road_joint_rep[index[0]][index[1]] for index in indexes]
@@ -160,6 +164,45 @@ def get_road_embedding3(road_list, gps_road_joint_rep, route_road_joint_rep, rou
 
     return road_embedding.detach()
 
+def random_batch_nodes(graph: nx.Graph, batch_size: int) -> List[List]:
+    """
+    将图的节点随机划分为多个batch，每个batch大小为batch_size，尽可能覆盖所有节点。
+    
+    参数:
+        graph (nx.Graph): 输入的networkx图
+        batch_size (int): 每个batch的节点数量
+        
+    返回:
+        List[List]: 包含多个batch的列表，每个batch是节点ID的列表
+    """
+    # 获取图中所有节点的列表
+    nodes = list(graph.nodes())
+    np.random.shuffle(nodes)  # 随机打乱节点顺序
+    
+    batches = []
+    for i in range(0, len(nodes), batch_size):
+        batch = nodes[i:i + batch_size]  # 切片获取当前batch
+        if len(batch) == batch_size:
+            batches.append(batch)
+    
+    return batches
+
+def split_batches(batch_size=32):
+    batch2g_dict = dict()
+    batches = []
+    # 读取子图轨迹字典：{sub_g_id: traj_set}
+    with open(f'../dataset/didi_chengdu/sub_g_traj_dict.pkl', 'rb') as f:
+        sub_g_traj_dict = pickle.load(f)
+    # 通过子图采样划分训练batch
+    for sub_g_id in sub_g_traj_dict.keys():
+        graph = pickle.load(open(f'../dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
+        # sub_batches = sample_by_degree(graph, batch_size)
+        sub_batches = random_batch_nodes(graph, batch_size)
+        for sub_batch in sub_batches:
+            batch2g_dict[len(batch2g_dict)] = sub_g_id
+            batches.append(sub_batch)
+    return batch2g_dict, batches
+
 # 从观测到的轨迹生成路段的表示
 # 输入的是完整的数据，包括路由与GPS
 def get_road_emb_from_traj(seq_model, test_data, without_gps=False, batch_size=1024, update_road='mean', city='chengdu'):
@@ -172,24 +215,50 @@ def get_road_emb_from_traj(seq_model, test_data, without_gps=False, batch_size=1
         masked_gps_assign_mat = torch.zeros_like(masked_gps_assign_mat) # 无实际意义，用于补位
         gps_length = torch.ones_like(gps_length) # 无实际意义，用于补位
 
+    sub_g_dict = dict()
+    # 读取子图轨迹字典：{sub_g_id: traj_set}
+    with open(f'../dataset/didi_chengdu/sub_g_traj_dict.pkl', 'rb') as f:
+        sub_g_traj_dict = pickle.load(f)
+    # 通过子图采样划分训练batch
+    for sub_g_id in sub_g_traj_dict.keys():
+        graph = pickle.load(open(f'../dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
+        sub_g_dict[sub_g_id] = graph
+    batch2g_dict, batches = split_batches(batch_size)
+    traj_idx_set = set()
+    for batch in batches:
+        traj_idx_set.update(batch)
     # 都放到显存里面放不下，需要分batch处理
     max_len = dataset['route_length'].max()
     with torch.no_grad():
         gps_road_joint_rep_list, route_road_joint_rep_list = [], []
-        for i in range(route_data.shape[0] // batch_size + 1):  # 最后不足batch_size的case不要了
-            start_idx = i * batch_size
-            end_idx = (i + 1) * batch_size
-            if end_idx > route_data.shape[0]:
-                end_idx = None
-            batch_route_data = route_data[start_idx:end_idx].cuda()
-            batch_masked_route_assign_mat = masked_route_assign_mat[start_idx:end_idx].cuda()
-            batch_gps_data = gps_data[start_idx:end_idx].cuda()
-            batch_masked_gps_assign_mat = masked_gps_assign_mat[start_idx:end_idx].cuda()
-            batch_route_assign_mat = route_assign_mat[start_idx:end_idx].cuda()
-            batch_gps_length = gps_length[start_idx:end_idx].cuda()
+        # for i in range(route_data.shape[0] // batch_size + 1):  # 最后不足batch_size的case不要了
+        #     start_idx = i * batch_size
+        #     end_idx = (i + 1) * batch_size
+        #     if end_idx > route_data.shape[0]:
+        #         end_idx = None
+        #     batch_route_data = route_data[start_idx:end_idx].cuda()
+            # batch_masked_route_assign_mat = masked_route_assign_mat[start_idx:end_idx].cuda()
+            # batch_gps_data = gps_data[start_idx:end_idx].cuda()
+            # batch_masked_gps_assign_mat = masked_gps_assign_mat[start_idx:end_idx].cuda()
+            # batch_route_assign_mat = route_assign_mat[start_idx:end_idx].cuda()
+            # batch_gps_length = gps_length[start_idx:end_idx].cuda()
+        
+        for batch_idx, batch in enumerate(batches):
+            # batch_graph邻接矩阵
+            batchg_id = batch2g_dict[batch_idx]
+            batchg = sub_g_dict[batchg_id].subgraph((batch)).copy()
+            batchg_adj = nx.adjacency_matrix(batchg, nodelist=batch)
+            
+            batch_route_data = torch.index_select(route_data, 0, torch.tensor(batch)).cuda()
+            batch_masked_route_assign_mat = torch.index_select(masked_route_assign_mat, 0, torch.tensor(batch)).cuda()
+            batch_gps_data = torch.index_select(gps_data, 0, torch.tensor(batch)).cuda()
+            batch_masked_gps_assign_mat = torch.index_select(masked_gps_assign_mat, 0, torch.tensor(batch)).cuda()
+            batch_route_assign_mat = torch.index_select(route_assign_mat, 0, torch.tensor(batch)).cuda()
+            batch_gps_length = torch.index_select(gps_length, 0, torch.tensor(batch)).cuda()
+
             _, _, _, _, gps_road_joint_rep, _, route_road_joint_rep, _ \
                 = seq_model(batch_route_data, batch_masked_route_assign_mat, batch_gps_data,
-                            batch_masked_gps_assign_mat, batch_route_assign_mat, batch_gps_length)
+                            batch_masked_gps_assign_mat, batch_route_assign_mat, batch_gps_length, batchg_adj)
             del batch_route_data, batch_masked_route_assign_mat, batch_gps_data, batch_masked_gps_assign_mat, batch_route_assign_mat, batch_gps_length
             padding = torch.zeros(
                 (
@@ -207,8 +276,10 @@ def get_road_emb_from_traj(seq_model, test_data, without_gps=False, batch_size=1
     gps_road_joint_rep = torch.cat(gps_road_joint_rep_list, dim=0).cpu()  # 注意gps_road_joint_rep_list中不能为空
     route_road_joint_rep = torch.cat(gps_road_joint_rep_list, dim=0).cpu()
 
-    road_list = get_road(dataset)
+    road_list = get_road(dataset.iloc[list(traj_idx_set)])
     print('number of roads observed: {}'.format(len(road_list)))
+
+    route_assign_mat = torch.index_select(route_assign_mat, 0, torch.tensor(list(traj_idx_set)))
 
     if update_road == 'mean':
         road_embedding = get_road_embedding1(road_list, gps_road_joint_rep, route_road_joint_rep, route_assign_mat,

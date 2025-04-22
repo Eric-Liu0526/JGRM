@@ -59,7 +59,7 @@ class JGRMModel(BaseModel):
         self.text_queue = nn.functional.normalize(self.route_queue, dim=0)
 
         # GNN层的初始化
-        self.gnn_layer = SeqGATBatch(in_feats=hidden_size, out_feats=hidden_size, num_heads=4)
+        self.gnn_layer = SeqGATBatch(in_feats=hidden_size, out_feats=hidden_size, num_heads=1)
 
     def encode_graph(self, drop_rate=0.):
         node_emb = self.node_embedding.weight
@@ -319,7 +319,7 @@ class SeqGATLayer(nn.Module):
         nn.init.xavier_uniform_(self.attn)
 
         self.w_embed = nn.Linear(1, num_heads)
-        self.proj = nn.Linear(out_feats*num_heads, out_feats)
+        # self.proj = nn.Linear(out_feats*num_heads, out_feats)
 
     def forward(self, X, A):
         """
@@ -363,8 +363,8 @@ class SeqGATLayer(nn.Module):
 
         # 合并所有节点的消息
         output = torch.stack(msgs, dim=0).permute(0, 2, 1, 3).reshape(N, L, -1)
-        final_emb = self.proj(output)
-        return final_emb
+        # final_emb = self.proj(output)
+        return output
 
 
     

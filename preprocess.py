@@ -150,7 +150,8 @@ def main2():
     dataset_name = 'chengdu'
     with open(f'dataset/didi_{dataset_name}/road_subgraph_node_ids.pkl', 'rb') as f:
         sub_g_dict = pkl.load(f)
-    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
+    # with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
+    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
         traj_df = pkl.load(file)
     sub_g_traj_dict = {key: set() for key in sub_g_dict}
     # 遍历轨迹数据，统计每个轨迹在每个子图中的段数
@@ -171,6 +172,7 @@ def main2():
     with open(f'dataset/didi_{dataset_name}/sub_g_traj_dict.pkl', 'wb') as f:
         pkl.dump(sub_g_traj_dict, f)
 
+# '''
 from concurrent.futures import ProcessPoolExecutor, as_completed
 def process_single_traj(index_traj, sub_g_dict):
     index, traj = index_traj
@@ -192,7 +194,8 @@ def main2p():
     with open(f'dataset/didi_{dataset_name}/road_subgraph_node_ids.pkl', 'rb') as f:
         sub_g_dict = pkl.load(f)
 
-    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
+    # with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
+    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
         traj_df = pkl.load(file)
     traj_df.reset_index(drop=True, inplace=True)
     sub_g_traj_dict = {key: set() for key in sub_g_dict}
@@ -207,11 +210,12 @@ def main2p():
     # 保存结果
     with open(f'dataset/didi_{dataset_name}/sub_g_traj_dict.pkl', 'wb') as f:
         pkl.dump(sub_g_traj_dict, f)
-
+# '''
 
 def build_traj_graph_sig(data_name, data_type, edge_weight_threshold=0.8):
     # 读取轨迹数据、划分后轨迹子图节点id、子图路段节点id
-    with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_sample10w.pkl', 'rb') as file:
+    # with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_sample10w.pkl', 'rb') as file:
+    with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
         traj_df = pkl.load(file)
     traj_df.reset_index(drop=True, inplace=True)
     with open(f'dataset/didi_{data_name}/sub_g_traj_dict.pkl', 'rb') as f:
