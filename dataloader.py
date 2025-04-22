@@ -307,6 +307,54 @@ def sample_batch(graph, batch_size):
     
     return sampled_nodes, node_features, adj_matrix
 
+
+from typing import List
+
+def sample_by_degree(graph: nx.Graph, batch_size: int) -> List[List]:
+    """
+    根据节点度从大到小排序，按顺序选择节点及其邻居，生成批次。
+    每次采样一个节点及其batch_size-1个邻居，邻居可以是多阶的，只有一阶邻居会被标记。
+    
+    参数:
+        graph (nx.Graph): 输入的networkx图
+        batch_size (int): 每个batch的节点数量
+        
+    返回:
+        List[List]: 包含多个batch的列表，每个batch是节点ID的列表
+    """
+    # 获取图中所有节点并按度排序，度大的节点优先
+    nodes = sorted(graph.nodes(), key=lambda x: graph.degree(x), reverse=True)
+    
+    # 创建一个已标记的节点集合，用于标记已采样的一阶邻居
+    sampled = set()
+    batches = []
+    for node in nodes:
+        if node not in sampled:  # 如果当前节点未被标记
+            # 采样当前节点
+            batch = [node]
+            sampled.add(node)  # 标记当前节点为已采样
+            
+            # 当前节点的所有邻居
+            neighbors = list(graph.neighbors(node))
+            
+            # 如果邻居数量不足，尝试从更高阶的邻居中采样
+            extra_neighbors = []  # 用于存储更多阶的邻居
+            level = 1
+            while len(batch) < batch_size and extra_neighbors:
+                # 获取当前level的邻居
+                next_level_neighbors = []
+                for neighbor in extra_neighbors:
+                    next_level_neighbors.extend(graph.neighbors(neighbor))
+                
+                # 过滤掉已采样的节点
+                next_level_neighbors = [n for n in next_level_neighbors if n not in sampled]
+                
+                # 还剩余需要的邻居
+                extra_neighbors = next_level_neighbors
+                batch.extend(extra_neighbors)
+                level += 1  # Repeat
+
+
 def random_batch_nodes(graph: nx.Graph, batch_size: int) -> List[List]:
     """
     将图的节点随机划分为多个batch，每个batch大小为batch_size，尽可能覆盖所有节点。
@@ -321,15 +369,14 @@ def random_batch_nodes(graph: nx.Graph, batch_size: int) -> List[List]:
     # 获取图中所有节点的列表
     nodes = list(graph.nodes())
     np.random.shuffle(nodes)  # 随机打乱节点顺序
-    
     batches = []
     for i in range(0, len(nodes), batch_size):
         batch = nodes[i:i + batch_size]  # 切片获取当前batch
         if len(batch) == batch_size:
             batches.append(batch)
-    
     return batches
 
+'''
 def split_batches(batch_size=32):
     batch2g_dict = dict()
     batches = []
@@ -339,20 +386,89 @@ def split_batches(batch_size=32):
     # 通过子图采样划分训练batch
     for sub_g_id in sub_g_traj_dict.keys():
         graph = pickle.load(open(f'dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
-        # sub_batches = sample_batch(graph, batch_size)
+        # sub_batches = sample_by_degree(graph, batch_size)
         sub_batches = random_batch_nodes(graph, batch_size)
         for sub_batch in sub_batches:
             batch2g_dict[len(batch2g_dict)] = sub_g_id
             batches.append(sub_batch)
     return batch2g_dict, batches
+'''
+def k_hop_sampling(G, node, k, max_sample_size):
+    """执行K-hop邻居采样"""
+    sampled_nodes = {node}
+    for _ in range(k):
+        neighbors = set()
+        for n in sampled_nodes:
+            neighbors.update(G.neighbors(n))  # 添加该节点的邻居
+        sampled_nodes.update(neighbors)
+        if len(sampled_nodes) >= max_sample_size:
+            break
+    return list(sampled_nodes)[:max_sample_size]
 
-    # for sub_g_id, traj_set in sub_g_traj_dict.items():
-    #     traj_list = list(traj_set)
-    #     for i in range(0, len(traj_list), batch_size):
-    #         split_list = traj_list[i:i+batch_size]
-    #         if len(split_list) == batch_size:
-    #             batches.append(split_list)
-    # return batches
+def split_batches(batch_size=64, pos_ratio=0.5, k=2, seed=42):
+    batch2g_dict = {}
+    batches = []
+    
+    # 读取子图轨迹字典：{sub_g_id: traj_set}
+    with open(f'dataset/didi_chengdu/sub_g_traj_dict.pkl', 'rb') as f:
+        sub_g_traj_dict = pickle.load(f)
+    
+    graph_dict = dict()
+    # 读取每个子图的图数据
+    for sub_g_id in sub_g_traj_dict.keys():
+        graph = pickle.load(open(f'dataset/didi_chengdu/traj_subg_{sub_g_id}.pkl', 'rb'))
+        graph_dict[sub_g_id] = graph
+    
+    random.seed(seed)
+    
+    # 计算正负例的节点数
+    pos_size = int(batch_size * pos_ratio)
+    neg_size = batch_size - pos_size
+    batch_id = 0
+
+    for subg_id, G in graph_dict.items():
+        nodes = list(G.nodes())
+        num_nodes = len(nodes)
+        
+        # 确保每个子图至少能生成一个batch
+        num_batches = (num_nodes + batch_size - 1) // batch_size  # 向上取整
+        
+        print(f"子图 {subg_id} 有 {num_nodes} 个节点, 将生成 {num_batches} 个batch")
+        
+        for _ in range(num_batches):
+            if len(nodes) < pos_size:
+                continue  # 正例节点太少就跳过
+            
+            # 正例采样（K-hop采样确保拓扑关系）
+            pos_sample = []
+            for node in nodes:
+                pos_sample.extend(k_hop_sampling(G, node, k, pos_size))
+            pos_sample = list(set(pos_sample))  # 去重，避免重复
+            if len(pos_sample) < pos_size:
+                continue  # 如果正例不够，跳过
+
+            # 负例采样
+            other_subg_ids = list(set(graph_dict.keys()) - {subg_id})
+            other_nodes = []
+            for oid in other_subg_ids:
+                other_nodes.extend(list(graph_dict[oid].nodes()))
+
+            if len(other_nodes) < neg_size:
+                continue  # 太少就跳过
+
+            neg_sample = random.sample(other_nodes, neg_size)
+
+            # 构建batch
+            batch_nodes = pos_sample[:pos_size] + neg_sample
+            random.shuffle(batch_nodes)
+
+            # 保存batch和对应的子图信息
+            batches.append(batch_nodes)
+            batch2g_dict[batch_id] = subg_id
+            batch_id += 1
+
+    return batch2g_dict, batches
+
 
 
 def get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed):

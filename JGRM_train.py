@@ -16,7 +16,7 @@ import pickle as pkl
 import networkx as nx
 from scipy.sparse import csr_array
 
-dev_id = 4
+dev_id = 5
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
@@ -155,10 +155,11 @@ def train(config):
             batchg_id = batch2g_dict[idx]
             gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, traj_idx = batch
 
-            # batch_graph邻接矩阵
+            # batch_graph正例的邻接矩阵（负例为其他子图对象，无连接）
             traj_idx = [tensor.item() for tensor in traj_idx]
-            batchg = sub_g_dict[batchg_id].subgraph((traj_idx)).copy()
-            batchg_adj = nx.adjacency_matrix(batchg, nodelist=traj_idx)
+            filtered_traj_idx = set(traj_idx).intersection(sub_g_dict[batchg_id].nodes)
+            batchg = sub_g_dict[batchg_id].subgraph((filtered_traj_idx)).copy()
+            batchg_adj = nx.adjacency_matrix(batchg, nodelist=filtered_traj_idx)
 
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
                                                                          vocab_size, mask_length, mask_prob)

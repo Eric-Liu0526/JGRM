@@ -194,14 +194,15 @@ def main2p():
     with open(f'dataset/didi_{dataset_name}/road_subgraph_node_ids.pkl', 'rb') as f:
         sub_g_dict = pkl.load(f)
 
-    # with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
-    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
+    with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb') as file:
+    # with open(f'dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
         traj_df = pkl.load(file)
     traj_df.reset_index(drop=True, inplace=True)
     sub_g_traj_dict = {key: set() for key in sub_g_dict}
 
+    num_workers = 20  # 设置线程数为4
     # 并行处理
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(process_single_traj, item, sub_g_dict) for item in traj_df.iterrows()]
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing with multiprocessing"):
             sub_g_id, index = future.result()
@@ -214,8 +215,8 @@ def main2p():
 
 def build_traj_graph_sig(data_name, data_type, edge_weight_threshold=0.8):
     # 读取轨迹数据、划分后轨迹子图节点id、子图路段节点id
-    # with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_sample10w.pkl', 'rb') as file:
-    with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
+    with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_sample10w.pkl', 'rb') as file:
+    # with open(f'dataset/didi_{data_name}/{data_name}_1101_1115_data_seq_evaluation.pkl', 'rb') as file:
         traj_df = pkl.load(file)
     traj_df.reset_index(drop=True, inplace=True)
     with open(f'dataset/didi_{data_name}/sub_g_traj_dict.pkl', 'rb') as f:
@@ -232,8 +233,34 @@ def build_traj_graph_sig(data_name, data_type, edge_weight_threshold=0.8):
         print(f'sub_graph_{subg_id} has {traj_num} trajs')
         
         # 创建一个有向图
-        sub_G = nx.DiGraph()
+        sub_G = nx.Graph()
 
+        cpath_lists = traj_sub_df['cpath_list']
+
+        # 创建一个进度条对象
+        pbar = tqdm(total=len(cpath_lists) * (len(cpath_lists) - 1) // 2)
+
+        for i in range(len(cpath_lists)):
+            for j in range(i+1, len(cpath_lists)):
+                cpath_list_i = cpath_lists.iloc[i]
+                cpath_list_j = cpath_lists.iloc[j]
+                # 计算两个轨迹的路径列表的交集
+                intersection = set(cpath_list_i).intersection(set(cpath_list_j))
+                # 计算两个轨迹的路径列表的并集
+                union = set(cpath_list_i).union(set(cpath_list_j))
+                # 计算权重
+                weight = len(intersection) / len(union)
+                # 如果权重大于阈值，则添加边
+                if weight > edge_weight_threshold:
+                    sub_G.add_edge(i, j, weight=weight)
+                # 更新进度条
+                pbar.update(1)
+
+        # 关闭进度条
+        pbar.close()
+
+
+        '''
         # 遍历子图中的轨迹，统计road_with_trajs_dict: {road: set(traj_id)}
         for index, row in tqdm(traj_sub_df.iterrows(), total=traj_sub_df.shape[0], desc=f'Reading {data_type} Data'):
             cpath_list = row['cpath_list']
@@ -255,17 +282,20 @@ def build_traj_graph_sig(data_name, data_type, edge_weight_threshold=0.8):
                             sub_G[index][traj_index]['weight'] += 1
                         else:
                             sub_G.add_edge(index, traj_index, weight=1)
-            
-        # 归一化权重：weight = 重合路段数 / 当前轨迹的路段总数
+
+        # 归一化权重：weight = 重合路段数 / 两个轨迹路段的并集
         edges_to_remove = []
         for u, v, d in sub_G.edges(data=True):
-            d['weight'] = d['weight'] / len(traj_sub_df.loc[u, 'cpath_list'])
+            d['weight'] = d['weight'] / len(set(traj_sub_df.loc[u, 'cpath_list']).union(set(traj_sub_df.loc[v, 'cpath_list'])))
             # 如果权重<=edge_weight_threshold，则删除边
             if d['weight'] <= edge_weight_threshold:
                 edges_to_remove.append((u, v))
         sub_G.remove_edges_from(edges_to_remove)
+        '''        
         with open(f'dataset/didi_{data_name}/traj_subg_{subg_id}.pkl', 'wb') as f:
             pkl.dump(sub_G, f)
+
+
         '''
         # 转为 PyG 格式
         edge_index = []
@@ -293,5 +323,5 @@ def main_build_graphs():
 if __name__ == '__main__':
     # main1()
     # main2()
-    # main2p()
+    main2p()
     main_build_graphs()
