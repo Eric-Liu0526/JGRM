@@ -1,9 +1,16 @@
 # 工程项目相关
 __pycache__/
 logs/
+code-version
 
 # 数据相关
 dataset/
+output.csv
+boundary.txt
+preprocess_log.txt
 
 # 模型相关
 research/
+
+# 临时文件
+temp/

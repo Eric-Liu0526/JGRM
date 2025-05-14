@@ -1,5 +1,5 @@
 from torch_geometric.nn import MessagePassing
-from torch_geometric.utils.scatter import scatter
+from torch_scatter import scatter
 
 class MeanAggregator(MessagePassing):
     def __init__(self):

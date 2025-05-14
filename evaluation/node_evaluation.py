@@ -1,5 +1,5 @@
 import sys
-sys.path.append(".")
+sys.path.append("..")
 import numpy as np
 import pandas as pd
 import time
@@ -10,8 +10,8 @@ import torch
 import os
 torch.set_num_threads(5)
 
-dev_id = 0
-os.environ['CUDA_VISIBLE_DEVICES'] = str(dev_id)
+dev_id = 4
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
 torch.cuda.set_device(dev_id)
 
 def evaluation(city, exp_path, model_name, start_time):
@@ -20,17 +20,17 @@ def evaluation(city, exp_path, model_name, start_time):
     embedding_name = model_name.split('.')[0]
 
     # load task 1 & task2 label
-    feature_df = pd.read_csv("D:/research/dataset/JMTR/didi_{}/edge_features.csv".format(city))
+    feature_df = pd.read_csv("dataset/didi_{}/edge_features.csv".format(city))
     num_nodes = len(feature_df)
     print("num_nodes:", num_nodes)
 
     # load adj
-    edge_index = np.load("D:/research/dataset/JMTR/didi_{}/line_graph_edge_idx.npy".format(city))
+    edge_index = np.load("dataset/didi_{}/line_graph_edge_idx.npy".format(city))
     print("edge_index shape:", edge_index.shape)
 
     # load origin train data
     test_node_data = pickle.load(
-        open('D:/research/dataset/JMTR/didi_{}/{}_1101_1115_data_sample10w.pkl'.format(city, city), 'rb'))
+        open('dataset/didi_{}/{}_1101_1115_data_sample10w.pkl'.format(city, city), 'rb'))
     road_list = get_road(test_node_data)
     print('number of road obervased in test data: {}'.format(len(road_list)))
 
@@ -56,7 +56,7 @@ def evaluation(city, exp_path, model_name, start_time):
     test_node_data = (route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, dataset)
 
     update_road = 'route'
-    emb_path = 'D:/research/dataset/JMTR/didi_{}/{}_1101_1115_road_embedding_{}_{}_{}.pkl'.format(
+    emb_path = 'dataset/didi_{}/{}_1101_1115_road_embedding_{}_{}_{}.pkl'.format(
         city, city, embedding_name, num_samples, update_road)
 
     if os.path.exists(emb_path):
@@ -81,8 +81,8 @@ if __name__ == '__main__':
 
     city = 'chengdu'
    
-    exp_path = 'D:/research/exp/JTMR_chengdu_230913165723'
-    model_name = 'JTMR_chengdu_v1_20_100000_230913165723_19.pt'
+    exp_path = 'research/exp/JTMR_chengdu_250419223112'
+    model_name = 'JTMR_chengdu_v1_30_100000_250419223112_29.pt'
 
     start_time = time.time()
     log_path = os.path.join(exp_path, 'evaluation')
