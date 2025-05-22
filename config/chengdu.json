@@ -6,7 +6,7 @@
   "adj_path": "dataset/didi_chengdu/line_graph_edge_idx.npy",
   "retrain": 1,
   "save_path": "research/exp/",
-  "batch_size":64,
+  "batch_size":16,
   "num_worker":0,
   "route_min_len": 10,
   "route_max_len": 100,

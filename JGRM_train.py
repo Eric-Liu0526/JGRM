@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from transformers import get_linear_schedule_with_warmup, AdamW
 from utils import weight_init
-from dataloader import get_train_loader, random_mask
+from dataloader import get_train_loader, random_mask, DynamicAnchorMemory
 from utils import setup_seed
 import numpy as np
 import json
@@ -13,9 +13,10 @@ from JGRM import JGRMModel
 from cl_loss import get_traj_match_loss
 from dcl import DCL
 import os
+import pickle as pkl
 
-dev_id = 0
-os.environ['CUDA_VISIBLE_DEVICES'] = str(dev_id)
+dev_id = 1
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
 
@@ -97,17 +98,28 @@ def train(config):
         model.apply(weight_init)
 
     train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
+    # todo: 待整合到config中
+    anchor_indices_path = 'dataset/didi_chengdu/anchor_indices_and_densities.pkl'
+    anchor_memory = DynamicAnchorMemory(anchor_indices_path, feature_dim=256, temperature=0.07)
+    anchor_loader = DynamicAnchorMemory.get_anchor_loader(train_loader, anchor_indices_path)
+    similarity_based_loader = anchor_loader.get_similarity_based_loader(train_loader, batch_size, 3)
     print('dataset is ready.')
 
-    epoch_step = train_loader.dataset.route_data.shape[0] // batch_size
-    total_steps = epoch_step * num_epochs
+    # epoch_step = train_loader.dataset.route_data.shape[0] // batch_size
+    epoch_1_step = anchor_loader.dataset.route_data.shape[0] // batch_size
+    epoch_2_step = similarity_based_loader.dataset.route_data.shape[0] // batch_size
+    num_1_epochs = 5
+    num_2_epochs = num_epochs - num_1_epochs
+    total_steps = epoch_1_step * num_1_epochs + epoch_2_step * num_2_epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_step, num_training_steps=total_steps)
 
     for epoch in range(num_epochs):
         model.train()
-        for idx, batch in enumerate(train_loader):
-            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length = batch
-
+        # todo: 待整合到config中
+        epoch_loader = anchor_loader if epoch < 5 else similarity_based_loader
+        for idx, batch in enumerate(epoch_loader):
+            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid_list = batch
+            
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
                                                                          vocab_size, mask_length, mask_prob)
 
@@ -117,7 +129,13 @@ def train(config):
             gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
             gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep \
                 = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length)
-
+    
+            # 初始更新锚轨迹的向量表征
+            if epoch < 5:
+                anchor_memory.update_memory(tid_list, gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep)
+            else:
+                anchor_memory.update_memory(tid_list, gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep)
+            
             # flatten road_rep
             mat2flatten = {}
             y_label = []
