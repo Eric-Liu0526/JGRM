@@ -6,7 +6,7 @@
   "adj_path": "dataset/didi_chengdu/line_graph_edge_idx.npy",
   "retrain": 1,
   "save_path": "research/exp/",
-  "batch_size":16,
+  "batch_size":64,
   "num_worker":0,
   "route_min_len": 10,
   "route_max_len": 100,
@@ -29,5 +29,8 @@
   "drop_road_rate": 0.1,
   "verbose": 1,
   "version": "v1",
-  "random_seed": 2023
+  "random_seed": 2023,
+  "num_positive": 5,
+  "similarity_matrix_path": "dataset/didi_chengdu/spatiotemporal_similarity_array.pkl",
+  "anchor_indices_path": "dataset/didi_chengdu/spatiotemporal_anchors.pkl"
 }

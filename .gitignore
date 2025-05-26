@@ -11,6 +11,8 @@ preprocess_log.txt
 
 # 模型相关
 research/
+watch.sh
 
 # 临时文件
 temp/
+temp.py

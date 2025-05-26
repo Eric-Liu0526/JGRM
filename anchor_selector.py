@@ -2,27 +2,36 @@ import numpy as np
 import pandas as pd
 from sklearn.neighbors import KernelDensity
 from sklearn.preprocessing import StandardScaler
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Set
 import pickle as pkl
 import time
 from sklearn.metrics.pairwise import euclidean_distances
 import matplotlib.pyplot as plt
+from abc import ABC, abstractmethod
+from tqdm import tqdm
 
-class AnchorSelector:
-    def __init__(self, bandwidth: float = 0.5, kernel: str = 'gaussian'):
-        """
-        初始化锚轨迹选择器
-        
-        参数:
-            bandwidth: 核密度估计的带宽参数
-            kernel: 核函数类型，可选 'gaussian', 'tophat', 'epanechnikov', 'exponential', 'linear', 'cosine'
-        """
-        self.bandwidth = bandwidth
-        self.kernel = kernel
-        self.kde = None
+class BaseAnchorSelector(ABC):
+    """锚点选择器的基类"""
+    
+    def __init__(self):
         self.features = None
         self.scaler = StandardScaler()
+    
+    @abstractmethod
+    def select_anchors(self, df: pd.DataFrame, n_anchors: int, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        选择锚点轨迹的抽象方法
         
+        参数:
+            df: 包含轨迹数据的DataFrame
+            n_anchors: 需要选择的锚轨迹数量
+            save_path: 保存结果的路径
+            
+        返回:
+            Tuple[np.ndarray, np.ndarray]: 返回锚轨迹的索引和对应的得分
+        """
+        pass
+    
     def extract_features(self, df: pd.DataFrame, fit_scaler: bool = True) -> np.ndarray:
         """
         从轨迹数据中提取特征
@@ -69,8 +78,24 @@ class AnchorSelector:
             features_scaled = self.scaler.transform(features)
         
         return features_scaled
+
+class DensityBasedAnchorSelector(BaseAnchorSelector):
+    """基于密度的锚点选择器"""
+    
+    def __init__(self, bandwidth: float = 0.5, kernel: str = 'gaussian'):
+        """
+        初始化基于密度的锚点选择器
         
-    def fit(self, df: pd.DataFrame) -> 'AnchorSelector':
+        参数:
+            bandwidth: 核密度估计的带宽参数
+            kernel: 核函数类型，可选 'gaussian', 'tophat', 'epanechnikov', 'exponential', 'linear', 'cosine'
+        """
+        super().__init__()
+        self.bandwidth = bandwidth
+        self.kernel = kernel
+        self.kde = None
+    
+    def fit(self, df: pd.DataFrame) -> 'DensityBasedAnchorSelector':
         """
         使用轨迹数据拟合核密度估计模型
         
@@ -88,12 +113,14 @@ class AnchorSelector:
         print(f'拟合模型时间: {end_time - start_time} 秒')
         return self
     
-    def select_anchors(self, n_anchors: int, save_path: str = None, df: pd.DataFrame = None) -> Tuple[np.ndarray, np.ndarray]:
+    def select_anchors(self, df: pd.DataFrame, n_anchors: int, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        选择锚轨迹
+        基于密度选择锚点轨迹
         
         参数:
+            df: 包含轨迹数据的DataFrame
             n_anchors: 需要选择的锚轨迹数量
+            save_path: 保存结果的路径
             
         返回:
             Tuple[np.ndarray, np.ndarray]: 返回锚轨迹的索引和对应的密度值
@@ -107,62 +134,19 @@ class AnchorSelector:
         # 选择密度最高的n_anchors个轨迹作为锚点
         anchor_indices = np.argsort(densities)[-n_anchors:]
         anchor_densities = densities[anchor_indices]
-        # 将anchor_indices转为tid
-        anchor_tids = df['tid'].iloc[anchor_indices]
+        
         if save_path is not None:
+            anchor_tids = df['tid'].iloc[anchor_indices]
             pkl.dump((anchor_tids, anchor_densities), open(save_path, 'wb'))
+            
         return anchor_indices, anchor_densities
     
-    def get_density_scores(self) -> np.ndarray:
-        """
-        获取所有轨迹的密度得分
-        
-        返回:
-            np.ndarray: 所有轨迹的密度得分
-        """
-        if self.kde is None:
-            raise ValueError("请先调用fit方法拟合模型")
-            
-        return np.exp(self.kde.score_samples(self.features))
-    
-    def cal_similarity(self, anchor_features, all_features):
-        """
-        计算锚点与所有轨迹的相似度
-        
-        参数:
-            anchor_features: 锚点特征，形状为 (n_anchors, n_features)
-            all_features: 所有轨迹特征，形状为 (n_trajectories, n_features)
-            
-        返回:
-            np.ndarray: 所有轨迹的相似度得分，形状为 (n_trajectories, n_anchors)
-        """
-        # 将所有特征合并后一起归一化
-        combined_features = np.vstack([anchor_features, all_features])
-        combined_features_norm = combined_features / np.linalg.norm(combined_features, axis=1, keepdims=True)
-        
-        # 分离回锚点特征和所有特征
-        n_anchors = anchor_features.shape[0]
-        anchor_features_norm = combined_features_norm[:n_anchors]
-        all_features_norm = combined_features_norm[n_anchors:]
-        
-        # 计算余弦相似度
-        similarity = np.dot(all_features_norm, anchor_features_norm.T)
-        # 获得每个锚点与所有轨迹的相似度
-        similarity = similarity.T
-
-        # 转化为相似度排名,按照相似度从小到大排序
-        similarity_rank = np.argsort(similarity, axis=1)
-
-        # 归一化相似度得分
-        # similarity = similarity / np.sum(similarity, axis=1, keepdims=True)
-
-        return similarity, similarity_rank
-
-    def evaluate_anchors(self, n_anchors: int, plot: bool = True) -> dict:
+    def evaluate_anchors(self, df: pd.DataFrame, n_anchors: int, plot: bool = True) -> dict:
         """
         评估锚点选择的质量
         
         参数:
+            df: 包含轨迹数据的DataFrame
             n_anchors: 锚点数量
             plot: 是否绘制评估图表
             
@@ -173,10 +157,10 @@ class AnchorSelector:
             raise ValueError("请先调用fit方法拟合模型")
             
         # 选择锚点
-        anchor_indices, anchor_densities = self.select_anchors(n_anchors)
+        anchor_indices, anchor_densities = self.select_anchors(df, n_anchors)
         
         # 1. 密度评估
-        all_densities = self.get_density_scores()
+        all_densities = np.exp(self.kde.score_samples(self.features))
         density_ratio = np.mean(anchor_densities) / np.mean(all_densities)
         
         # 2. 空间分布评估
@@ -187,10 +171,9 @@ class AnchorSelector:
         avg_min_distance = np.mean(min_distances)
         
         # 3. 覆盖率评估
-        # 计算每个原始轨迹到最近锚点的距离
         all_distances = euclidean_distances(self.features, anchor_features)
         min_distances_to_anchors = np.min(all_distances, axis=1)
-        coverage_threshold = np.percentile(min_distances_to_anchors, 90)  # 90%的轨迹都在这个距离内
+        coverage_threshold = np.percentile(min_distances_to_anchors, 90)
         coverage_ratio = np.mean(min_distances_to_anchors <= coverage_threshold)
         
         # 4. 密度分布评估
@@ -198,12 +181,12 @@ class AnchorSelector:
         density_quality = np.mean(anchor_densities > density_percentile)
         
         metrics = {
-            'density_ratio': density_ratio,  # 锚点平均密度与整体平均密度的比值
-            'avg_min_distance': avg_min_distance,  # 锚点之间的平均最小距离
-            'coverage_ratio': coverage_ratio,  # 覆盖率
-            'density_quality': density_quality,  # 密度质量
-            'anchor_densities': anchor_densities,  # 锚点密度值
-            'all_densities': all_densities  # 所有轨迹的密度值
+            'density_ratio': density_ratio,
+            'avg_min_distance': avg_min_distance,
+            'coverage_ratio': coverage_ratio,
+            'density_quality': density_quality,
+            'anchor_densities': anchor_densities,
+            'all_densities': all_densities
         }
         
         if plot:
@@ -212,9 +195,7 @@ class AnchorSelector:
         return metrics
     
     def _plot_evaluation_metrics(self, metrics: dict):
-        """
-        绘制评估指标的图表
-        """
+        """绘制评估指标的图表"""
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         
         # 1. 密度分布图
@@ -251,13 +232,221 @@ class AnchorSelector:
         plt.tight_layout()
         plt.savefig('anchor_evaluation.png')
 
-def select_anchors(bandwidth=0.5, kernel='gaussian', n_anchors=1000):
+class SpatiotemporalAnchorSelector(BaseAnchorSelector):
+    """基于时空分布的锚点选择器"""
+    
+    def __init__(self, alpha: float = 0.5):
+        """
+        初始化基于时空分布的锚点选择器
+        
+        参数:
+            alpha: 时间权重因子
+        """
+        super().__init__()
+        self.alpha = alpha
+    
+    def select_anchors(self, df: pd.DataFrame, n_anchors: int, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        基于时空分布选择锚点轨迹
+        
+        参数:
+            df: 包含轨迹数据的DataFrame
+            n_anchors: 需要选择的锚轨迹数量
+            save_path: 保存结果的路径
+            
+        返回:
+            Tuple[np.ndarray, np.ndarray]: 返回锚轨迹的索引和对应的增益值
+        """
+        # 初始化数据结构
+        T = set(df['tid'].values)  # 所有轨迹ID集合
+        cpath_dict = {tid: set(df[df['tid'] == tid]['opath_list'].iloc[0]) for tid in T}  # 轨迹ID到道路段集合的映射
+        time_dict = {tid: pd.to_datetime(df[df['tid'] == tid]['start_time'].iloc[0]).hour for tid in T}  # 轨迹ID到时间段的映射
+        
+        selected_anchors = []
+        covered_segments = set()
+        covered_time_buckets = set()
+        anchor_gains = []
+        
+        
+        pbar = tqdm(total=n_anchors, desc='选择锚点轨迹')
+        while len(selected_anchors) < n_anchors:
+            best_tid = None
+            max_gain = -1
+            
+            # 使用tqdm显示内层循环进度
+            for tid in tqdm(T, desc='遍历轨迹', leave=False):
+                if tid in selected_anchors:
+                    continue
+                    
+                seg_set = cpath_dict[tid]
+                time_bucket = time_dict[tid]
+                
+                # 计算增量增益
+                new_segments = seg_set - covered_segments
+                new_time = 0 if time_bucket in covered_time_buckets else 1
+                
+                gain = len(new_segments) + self.alpha * new_time
+                
+                if gain > max_gain:
+                    max_gain = gain
+                    best_tid = tid
+            
+            if best_tid is None:
+                break  # 没有更多有增益的锚点
+                
+            selected_anchors.append(best_tid)
+            anchor_gains.append(max_gain)
+            covered_segments.update(cpath_dict[best_tid])
+            covered_time_buckets.add(time_dict[best_tid])
+            
+            # 更新外层进度条
+            pbar.update(1)
+            
+        pbar.close()
+                
+        # 将tid转换为索引
+        anchor_indices = [df[df['tid'] == tid].index[0] for tid in selected_anchors]
+        
+        if save_path is not None:
+            pkl.dump((selected_anchors, anchor_gains), open(save_path, 'wb'))
+            
+        return np.array(anchor_indices), np.array(anchor_gains)
+
+    def calculate_similarity_matrix(self, df: pd.DataFrame, anchor_indices: np.ndarray, 
+                                  lambda_weight: float = 0.5, tau: float = 2.0,
+                                  save_path: str = None) -> Dict[int, Dict[int, float]]:
+        """
+        计算锚点轨迹与所有轨迹之间的相似度矩阵
+        
+        参数:
+            df: 包含轨迹数据的DataFrame
+            anchor_indices: 锚点轨迹的索引数组
+            lambda_weight: 结构相似性的权重
+            tau: 时间衰减因子
+            save_path: 保存结果的路径
+            
+        返回:
+            Dict[int, Dict[int, float]]: 相似度矩阵，格式为 {anchor_tid: {traj_tid: similarity_score}}
+        """
+        # 获取所有轨迹ID
+        all_traj_ids = df['tid'].values
+        anchor_tids = df.iloc[anchor_indices]['tid'].values
+        
+        # 构建道路段字典和时间字典
+        cpath_dict = {tid: set(df[df['tid'] == tid]['opath_list'].iloc[0]) for tid in all_traj_ids}
+        time_dict = {tid: pd.to_datetime(df[df['tid'] == tid]['start_time'].iloc[0]).hour for tid in all_traj_ids}
+        
+        # 初始化相似度矩阵
+        similarity_matrix = {}
+        
+        # 使用tqdm显示进度
+        for anchor_tid in tqdm(anchor_tids, desc='计算相似度矩阵'):
+            Ai = cpath_dict[anchor_tid]
+            ti = time_dict[anchor_tid]
+            similarity_matrix[anchor_tid] = {}
+            
+            for traj_tid in all_traj_ids:
+                if traj_tid == anchor_tid:
+                    continue
+                    
+                Tj = cpath_dict[traj_tid]
+                tj = time_dict[traj_tid]
+                
+                # 计算结构相似性（Jaccard指数）
+                if len(Ai | Tj) == 0:
+                    jaccard = 0.0
+                else:
+                    jaccard = len(Ai & Tj) / len(Ai | Tj)
+                
+                # 计算时间相似性（指数衰减）
+                time_sim = np.exp(-abs(ti - tj) / tau)
+                
+                # 计算组合相似度
+                sim_score = lambda_weight * jaccard + (1 - lambda_weight) * time_sim
+                
+                similarity_matrix[anchor_tid][traj_tid] = sim_score
+        
+        if save_path is not None:
+            pkl.dump(similarity_matrix, open(save_path, 'wb'))
+            
+        return similarity_matrix
+    
+    def convert_similarity_matrix_to_array(self, similarity_matrix: Dict[int, Dict[int, float]], 
+                                         df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        将字典格式的相似度矩阵转换为numpy数组格式
+        
+        参数:
+            similarity_matrix: 字典格式的相似度矩阵
+            df: 包含轨迹数据的DataFrame
+            
+        返回:
+            Tuple[np.ndarray, np.ndarray]: 相似度矩阵和相似度排名矩阵
+        """
+        # 获取所有轨迹ID
+        all_traj_ids = df['tid'].values
+        anchor_tids = list(similarity_matrix.keys())
+        
+        # 创建映射字典
+        traj_id_to_idx = {tid: idx for idx, tid in enumerate(all_traj_ids)}
+        anchor_id_to_idx = {tid: idx for idx, tid in enumerate(anchor_tids)}
+        
+        # 初始化相似度矩阵
+        n_anchors = len(anchor_tids)
+        n_trajs = len(all_traj_ids)
+        similarity_array = np.zeros((n_anchors, n_trajs))
+        
+        # 填充相似度矩阵
+        for anchor_tid, traj_sims in similarity_matrix.items():
+            anchor_idx = anchor_id_to_idx[anchor_tid]
+            for traj_tid, sim_score in traj_sims.items():
+                traj_idx = traj_id_to_idx[traj_tid]
+                similarity_array[anchor_idx, traj_idx] = sim_score
+        
+        # 计算相似度排名
+        similarity_rank = np.argsort(similarity_array, axis=1)
+        
+        return similarity_array, similarity_rank
+
+def select_anchors_by_density(bandwidth=0.5, kernel='gaussian', n_anchors=1000):
+    """使用基于密度的方法选择锚点"""
     df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
     save_path = 'dataset/didi_chengdu/anchor_indices_and_densities.pkl'
-    anchor_selector = AnchorSelector(bandwidth=bandwidth, kernel=kernel)
+    anchor_selector = DensityBasedAnchorSelector(bandwidth=bandwidth, kernel=kernel)
     anchor_selector.fit(df)
-    anchor_indices, anchor_densities = anchor_selector.select_anchors(n_anchors, save_path, df)
+    anchor_indices, anchor_densities = anchor_selector.select_anchors(df, n_anchors, save_path)
     return anchor_indices, anchor_densities
+
+def select_anchors_by_spatiotemporal(alpha=0.5, n_anchors=1000, lambda_weight=0.5, tau=2.0):
+    """使用基于时空分布的方法选择锚点"""
+    df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
+    df = df.reset_index(drop=True)
+    save_path = 'dataset/didi_chengdu/spatiotemporal_anchors.pkl'
+    similarity_save_path = 'dataset/didi_chengdu/spatiotemporal_similarity.pkl'
+    
+    # 选择锚点
+    anchor_selector = SpatiotemporalAnchorSelector(alpha=alpha)
+    # anchor_indices, anchor_gains = anchor_selector.select_anchors(df, n_anchors, save_path)
+    # 直接读取pkl文件
+    tids, anchor_gains = pkl.load(open(save_path, 'rb'))
+    # 将tids转换为索引
+    anchor_indices = [df['tid'].tolist().index(tid) for tid in tids]
+    
+    # 计算相似度矩阵
+    similarity_matrix = anchor_selector.calculate_similarity_matrix(
+        df, anchor_indices, lambda_weight, tau, similarity_save_path
+    )
+    
+    # 转换为数组格式
+    similarity_array, similarity_rank = anchor_selector.convert_similarity_matrix_to_array(
+        similarity_matrix, df
+    )
+    
+    # 保存数组格式的相似度矩阵
+    pkl.dump((similarity_array, similarity_rank), 
+             open('dataset/didi_chengdu/spatiotemporal_similarity_array.pkl', 'wb'))
+    
+    return anchor_indices, anchor_gains, similarity_array, similarity_rank
 
 def cal_similarity_matrix(anchor_indices_path='dataset/didi_chengdu/anchor_indices_and_densities.pkl'):
     """
@@ -282,7 +471,7 @@ def cal_similarity_matrix(anchor_indices_path='dataset/didi_chengdu/anchor_indic
     all_df = df.copy()
     
     # 提取特征向量
-    anchor_selector = AnchorSelector()
+    anchor_selector = BaseAnchorSelector()
     # 先对所有数据进行标准化
     all_features = anchor_selector.extract_features(all_df, fit_scaler=True)
     # 使用相同的标准化参数处理锚点特征
@@ -296,21 +485,11 @@ def cal_similarity_matrix(anchor_indices_path='dataset/didi_chengdu/anchor_indic
     pkl.dump(similarity_rank, open('dataset/didi_chengdu/similarity_rank.pkl', 'wb'))
 
 if __name__ == "__main__":
-    # select_anchors(0.5, 'gaussian', 1024)
-    cal_similarity_matrix()
-    # df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
-    # start_time = time.time()
-    # anchor_selector = AnchorSelector(bandwidth=0.5, kernel='gaussian')
-    # anchor_selector.fit(df)
-    # # anchor_indices, anchor_densities = anchor_selector.select_anchors(1000, 'dataset/didi_chengdu/anchor_indices_and_densities.pkl')
+    # 使用基于密度的方法选择锚点
+    # select_anchors_by_density(0.5, 'gaussian', 1024)
     
-    # # 评估锚点质量
-    # metrics = anchor_selector.evaluate_anchors(1000)
-    # print("\n评估指标:")
-    # print(f"密度比值: {metrics['density_ratio']:.2f}")
-    # print(f"平均最小距离: {metrics['avg_min_distance']:.2f}")
-    # print(f"覆盖率: {metrics['coverage_ratio']:.2f}")
-    # print(f"密度质量: {metrics['density_quality']:.2f}")
+    # 使用基于时空分布的方法选择锚点
+    select_anchors_by_spatiotemporal(alpha=0.5, n_anchors=1024, lambda_weight=0.5, tau=2.0)
     
-    # end_time = time.time()
-    # print(f'\n总运行时间: {end_time - start_time} 秒')
+    # 计算相似度矩阵
+    # cal_similarity_matrix()

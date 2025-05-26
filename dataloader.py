@@ -324,7 +324,7 @@ def random_mask(gps_assign_mat, route_assign_mat, gps_length, mask_token, mask_l
     return masked_route_assign_mat, masked_gps_assign_mat
 
 class DynamicAnchorMemory(Dataset):
-    def __init__(self, anchor_indices_path, feature_dim=256, temperature=0.07):
+    def __init__(self, data_path, feature_dim=256, temperature=0.07):
         """
         初始化动态记忆库
         
@@ -347,11 +347,86 @@ class DynamicAnchorMemory(Dataset):
         # 存储锚轨迹的tid和密度
         self.anchor_tids = None
         self.anchor_densities = None
-        
+
+        anchor_indices_path = f'{data_path}/anchor_indices_and_densities.pkl'
+        similarity_matrix_path = f'{data_path}/similarity_matrix.pkl'
+        similarity_rank_path = f'{data_path}/similarity_rank.pkl'
         self.set_anchor_indices(anchor_indices_path)
+        self.set_similarity_matrix(similarity_matrix_path, similarity_rank_path)
         self.train_loader = None
-        # 用于存储每个锚轨迹的访问频率
-        # self.access_frequency = torch.zeros(memory_size).cuda()
+
+    @staticmethod
+    def get_anchor_loader(train_loader, anchor_indices_path):
+        """
+        从训练数据加载器中获取锚轨迹数据
+        
+        参数:
+            train_loader: 训练数据加载器
+            anchor_indices_path: 锚轨迹索引文件路径
+            
+        返回:
+            锚轨迹数据加载器
+        """
+        # 从anchor_indices_path中获取锚轨迹的anchor_tids
+        anchor_tids, _ = pkl.load(open(anchor_indices_path, 'rb'))
+        # 获取anchor_tids在train_loader.dataset中的索引
+        anchor_indices = [train_loader.dataset.tid_list.index(tid) for tid in anchor_tids]
+        
+        # 创建锚轨迹数据集
+        anchor_dataset = torch.utils.data.Subset(train_loader.dataset, anchor_indices)
+        
+        # 创建数据加载器，保持与train_loader相同的参数
+        anchor_loader = torch.utils.data.DataLoader(
+            anchor_dataset,
+            batch_size=train_loader.batch_size,
+            shuffle=True,
+            num_workers=train_loader.num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+        
+        return anchor_loader
+
+    def get_similarity_based_loader(self, train_loader, batch_size, num_positive):
+        """
+        构建基于相似度的训练数据加载器
+        
+        参数:
+            train_loader: 原始训练数据加载器
+            batch_size: batch大小
+            num_positive: 每个batch中正样本的数量
+            
+        返回:
+            新的训练数据加载器
+        """
+        if self.similarity_matrix is None:
+            raise ValueError("similarity_matrix is not set")
+        if self.similarity_rank is None:
+            raise ValueError("similarity_rank is not set")
+        if self.anchor_tids is None:
+            raise ValueError("anchor_tids is not set")
+        
+        # 创建新的数据集
+        dataset = SimilarityBasedDataset(
+            train_loader.dataset,
+            self.similarity_rank,
+            self.anchor_tids,
+            batch_size,
+            num_positive
+        )
+        
+        # 创建数据加载器，保持与train_loader相同的参数
+        new_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=train_loader.num_workers,
+            pin_memory=True,
+            drop_last=True
+        )
+        
+        self.train_loader = new_loader
+        return new_loader
 
     def set_anchor_indices(self, anchor_indices_path):
         self.anchor_tids, self.anchor_densities = pkl.load(open(anchor_indices_path, 'rb'))
@@ -369,9 +444,6 @@ class DynamicAnchorMemory(Dataset):
             for tid, vector in vector_dict.items():
                 self.memory[tid] = vector
                 
-            # 更新访问频率
-            # self.access_frequency[indices] += 1
-            
     def update_memory(self, tid_list, gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep):
         """
         更新记忆库中的表征
@@ -400,9 +472,6 @@ class DynamicAnchorMemory(Dataset):
                     'route_traj_joint_rep': route_traj_joint_rep,
                 }
                 
-            # 更新访问频率
-            # self.access_frequency[indices] += 1
-        
     def get_memory(self, tids=None):
         """
         获取记忆库中的表征
@@ -439,82 +508,6 @@ class DynamicAnchorMemory(Dataset):
         self.similarity_rank = similarity_rank
         return similarity_matrix, similarity_rank
     
-    def get_similarity_based_loader(self, train_loader, batch_size, num_positive):
-        """
-        构建基于相似度的训练数据加载器
-        
-        参数:
-            train_loader: 原始训练数据加载器
-            batch_size: batch大小
-            num_positive: 每个batch中正样本的数量
-            
-        返回:
-            新的训练数据加载器
-        """
-        if self.similarity_matrix is None:
-            raise ValueError("similarity_matrix is not set")
-        if self.similarity_rank is None:
-            raise ValueError("similarity_rank is not set")
-        if self.anchor_tids is None:
-            raise ValueError("anchor_tids is not set")
-        
-        # 加载相似度排名和锚轨迹tid
-        similarity_rank = self.similarity_rank
-        anchor_tids = self.anchor_tids
-        
-        # 创建新的数据集
-        dataset = SimilarityBasedDataset(
-            train_loader.dataset,
-            similarity_rank,
-            anchor_tids,
-            batch_size,
-            num_positive
-        )
-        
-        # 创建数据加载器
-        new_loader = DataLoader(
-            dataset,
-            batch_size=1,  # 因为每个batch已经在dataset中构建好了
-            shuffle=True,
-            num_workers=train_loader.num_workers,
-            pin_memory=True
-        )
-        
-        self.train_loader = new_loader
-        return new_loader
-    
-        '''
-    # 动态设置训练batch中的轨迹
-    def set_train_batch_trajectory(self, train_loader, batch_size, num_positive):
-        """
-        设置训练batch中的轨迹
-        
-        """
-        train_loader = get_similarity_based_loader(train_loader, batch_size, num_positive)
-
-        
-        # 存储每个锚轨迹的batch,batch_dict:{anchor_tid:[([postives],[negatives])*num_anchor_batch]}
-        batch_dict = dict()
-        num_all = train_loader.dataset.route_data.shape[0]
-        num_negative = batch_size - num_positive - 1
-        # 计算每个锚轨迹的batch数量
-        num_anchor_batch_traj = (num_all // self.memory_size + 1)
-        num_anchor_batch = (self.memory_size // batch_size + 1)
-
-        # 针对每个锚轨迹，选出anchor_batch_num个batch_size的轨迹组
-        for anchor_idx, anchor_tid in enumerate(self.anchor_tids):
-            anchor_batch_list = list()
-            for i in range(num_anchor_batch):
-                pos_start_idx = i * num_positive
-                neg_start_idx = num_all - (num_anchor_batch - i) * num_negative
-                postives = self.similarity_rank[anchor_idx, pos_start_idx:pos_start_idx+num_positive-1]
-                negatives = self.similarity_rank[anchor_idx, neg_start_idx:neg_start_idx+num_negative-1]
-                anchor_batch_list.append((postives,negatives))
-            batch_dict[anchor_tid] = anchor_batch_list
-
-        # 构建train_loader
-        '''
-
     def knowledge_transfer(self, query_features, top_k=5):
         """
         基于相似度进行知识迁移
@@ -568,37 +561,6 @@ class DynamicAnchorMemory(Dataset):
     
     def __getitem__(self, idx):
         return self.memory[idx]
-    
-    @staticmethod
-    def get_anchor_loader(train_loader, anchor_indices_path):
-        """
-        从训练数据加载器中获取锚轨迹数据
-        
-        参数:
-            train_loader: 训练数据加载器
-            anchor_indices_path: 锚轨迹索引文件路径
-            
-        返回:
-            锚轨迹数据加载器
-        """
-        # 从anchor_indices_path中获取锚轨迹的anchor_tids
-        anchor_tids, _ = pkl.load(open(anchor_indices_path, 'rb'))
-        # 获取anchor_tids在train_loader.dataset中的索引
-        anchor_indices = [train_loader.dataset.tid_list.index(tid) for tid in anchor_tids]
-        
-        # 创建锚轨迹数据集
-        anchor_dataset = torch.utils.data.Subset(train_loader.dataset, anchor_indices)
-        
-        # 创建数据加载器
-        anchor_loader = torch.utils.data.DataLoader(
-            anchor_dataset,
-            batch_size=train_loader.batch_size,
-            shuffle=True,
-            num_workers=train_loader.num_workers,
-            pin_memory=True
-        )
-        
-        return anchor_loader
 
 class SimilarityBasedDataset(Dataset):
     def __init__(self, original_dataset, similarity_rank, anchor_tids, batch_size, num_positive):
@@ -621,8 +583,12 @@ class SimilarityBasedDataset(Dataset):
         
         # 计算每个锚轨迹可以生成的batch数量
         self.num_all = len(original_dataset)
-        self.num_anchor_batch = (self.num_all // self.batch_size + 1)
+        num_anchor_batch_traj = self.num_all // len(self.anchor_tids) + 1
+        self.num_anchor_batch = num_anchor_batch_traj // self.batch_size + 1
         
+        # 记录每个轨迹被训练的次数
+        self.train_count = [0] * self.num_all
+
         # 构建所有可能的batch
         self.batches = []
         for anchor_idx, anchor_tid in enumerate(self.anchor_tids):
@@ -630,10 +596,13 @@ class SimilarityBasedDataset(Dataset):
                 # 获取正样本索引
                 pos_start_idx = i * self.num_positive
                 pos_indices = self.similarity_rank[anchor_idx, pos_start_idx:pos_start_idx+self.num_positive]
-                
+                for index in pos_indices:
+                    self.train_count[index] += 1
                 # 获取负样本索引
                 neg_start_idx = self.num_all - (self.num_anchor_batch - i) * self.num_negative
                 neg_indices = self.similarity_rank[anchor_idx, neg_start_idx:neg_start_idx+self.num_negative]
+                for index in neg_indices:
+                    self.train_count[index] += 1
                 
                 # 获取锚轨迹索引
                 anchor_idx_in_dataset = self.original_dataset.tid_list.index(anchor_tid)
@@ -641,15 +610,221 @@ class SimilarityBasedDataset(Dataset):
                 # 组合成一个batch
                 batch_indices = np.concatenate([[anchor_idx_in_dataset], pos_indices, neg_indices])
                 self.batches.append(batch_indices)
+        # 将batches合成一个list
+        self.batches = [item for sublist in self.batches for item in sublist]
+        # 将train_count写入txt文件
+        with open('train_count.txt', 'w') as f:
+            for count in self.train_count:
+                f.write(f"{count}\n")
+            # 将train_count中的0的个数写入txt文件
+            f.write(f"0的个数: {self.train_count.count(0)}\n")
     
     def __len__(self):
         return len(self.batches)
     
     def __getitem__(self, idx):
-        batch_indices = self.batches[idx]
+        # batch_indices = self.batches[idx]
+        # # 获取batch中的所有数据
+        # gps_data_list = []
+        # gps_assign_mat_list = []
+        # route_data_list = []
+        # route_assign_mat_list = []
+        # gps_length_list = []
+        # tid_list = []
+        
+        # for index in batch_indices:
+        #     gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid = self.original_dataset[index]
+        #     gps_data_list.append(gps_data)
+        #     gps_assign_mat_list.append(gps_assign_mat)
+        #     route_data_list.append(route_data)
+        #     route_assign_mat_list.append(route_assign_mat)
+        #     gps_length_list.append(gps_length)
+        #     tid_list.append(tid)
+        
+        # # 将列表转换为张量
+        # gps_data = torch.stack(gps_data_list)
+        # gps_assign_mat = torch.stack(gps_assign_mat_list)
+        # route_data = torch.stack(route_data_list)
+        # route_assign_mat = torch.stack(route_assign_mat_list)
+        # gps_length = torch.stack(gps_length_list)
+        
+        # return gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid_list
+        
+        return self.original_dataset[self.batches[idx]]
+
+class DynamicBatchDataset(Dataset):
+    def __init__(self, original_dataset, similarity_matrix, anchor_tids, 
+                 batch_anchor_size=32, num_positive=5, num_negative=10, 
+                 neg_threshold=0.5, top_k=100):
+        """
+        动态批次划分数据集
+        
+        参数:
+            original_dataset: 原始数据集
+            similarity_matrix: 相似度矩阵，格式为 {anchor_tid: [(traj_tid, score), ...]}
+            anchor_tids: 锚轨迹ID列表
+            batch_anchor_size: 每个批次中的锚轨迹数量
+            num_positive: 每个锚轨迹的正样本数量
+            num_negative: 每个锚轨迹的负样本数量
+            neg_threshold: 负样本的最大相似度阈值
+            top_k: 每个锚轨迹保留的候选轨迹数量
+        """
+        self.original_dataset = original_dataset
+        self.similarity_matrix = similarity_matrix
+        self.anchor_tids = anchor_tids
+        self.batch_anchor_size = batch_anchor_size
+        self.num_positive = num_positive
+        self.num_negative = num_negative
+        self.neg_threshold = neg_threshold
+        self.top_k = top_k
+        
+        # 预处理：为每个锚轨迹保留top-K个候选轨迹
+        self.anchor_to_topK = {}
+        for anchor_tid in self.anchor_tids:
+            # 获取相似度排序后的轨迹列表
+            sorted_trajs = sorted(self.similarity_matrix[anchor_tid].items(), 
+                                key=lambda x: x[1], reverse=True)
+            # 只保留top-K个候选轨迹
+            self.anchor_to_topK[anchor_tid] = [tid for tid, _ in sorted_trajs[:top_k]]
+        
+        # 获取所有轨迹ID
+        self.all_traj_ids = original_dataset.tid_list
+        
+        # 初始化批次列表
+        self.batches = []
+        self.current_epoch = 0
+        
+        # 生成初始批次
+        self._generate_batches()
+    
+    def _generate_batches(self):
+        """生成新的批次"""
+        self.batches = []
+        
+        # 随机打乱锚轨迹
+        anchor_pool = self.anchor_tids.copy()
+        np.random.shuffle(anchor_pool)
+        
+        # 按批次大小划分锚轨迹
+        for i in range(0, len(anchor_pool), self.batch_anchor_size):
+            batch_anchors = anchor_pool[i:i + self.batch_anchor_size]
+            batch = []
+            
+            for anchor_tid in batch_anchors:
+                # 正样本采样（滑动窗口）
+                pos_pool = self.anchor_to_topK[anchor_tid]
+                start_idx = self.current_epoch % (len(pos_pool) - self.num_positive + 1)
+                positives = pos_pool[start_idx:start_idx + self.num_positive]
+                
+                # 负样本采样
+                excluded = set(positives + [anchor_tid])
+                # 从相似度矩阵中获取低相似度的候选轨迹
+                neg_candidates = [
+                    tid for tid, score in self.similarity_matrix[anchor_tid].items()
+                    if score < self.neg_threshold and tid not in excluded
+                ]
+                
+                # 如果负样本候选不足，从全局随机采样补充
+                if len(neg_candidates) < self.num_negative:
+                    backup = [tid for tid in self.all_traj_ids if tid not in excluded]
+                    neg_candidates.extend(np.random.choice(backup, 
+                                                         size=self.num_negative - len(neg_candidates),
+                                                         replace=False))
+                
+                # 随机选择负样本
+                negatives = np.random.choice(neg_candidates, 
+                                           size=self.num_negative, 
+                                           replace=False)
+                
+                # 将锚轨迹、正样本和负样本添加到批次中
+                batch.append((anchor_tid, positives, negatives))
+            
+            self.batches.append(batch)
+    
+    def set_epoch(self, epoch):
+        """设置当前epoch"""
+        self.current_epoch = epoch
+        self._generate_batches()
+    
+    def __len__(self):
+        """返回批次数量"""
+        return len(self.batches)
+    
+    def __getitem__(self, idx):
+        """获取指定批次的数据"""
+        batch = self.batches[idx]
+        
+        # 收集批次中的所有轨迹ID
+        all_tids = []
+        for anchor_tid, positives, negatives in batch:
+            all_tids.extend([anchor_tid] + positives.tolist() + negatives.tolist())
+        
+        # 获取所有轨迹的数据
         batch_data = []
-        for index in batch_indices:
-            data = self.original_dataset[index]
-            batch_data.append(data)
-        return batch_data
+        for tid in all_tids:
+            # 在原始数据集中查找轨迹
+            traj_idx = self.original_dataset.tid_list.index(tid)
+            traj_data = self.original_dataset[traj_idx]
+            batch_data.append(traj_data)
+        
+        # 将数据组织成批次格式
+        gps_data = torch.stack([data[0] for data in batch_data])
+        gps_assign_mat = torch.stack([data[1] for data in batch_data])
+        route_data = torch.stack([data[2] for data in batch_data])
+        route_assign_mat = torch.stack([data[3] for data in batch_data])
+        gps_length = torch.stack([data[4] for data in batch_data])
+        tid_list = [data[5] for data in batch_data]
+        
+        # 返回批次数据
+        return gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid_list
+
+def get_dynamic_batch_loader(data_path, similarity_matrix_path, anchor_indices_path,
+                           batch_anchor_size=32, num_positive=5, num_negative=10,
+                           neg_threshold=0.5, top_k=100, num_workers=4):
+    """
+    获取动态批次数据加载器
+    
+    参数:
+        data_path: 数据路径
+        similarity_matrix_path: 相似度矩阵路径
+        anchor_indices_path: 锚轨迹索引路径
+        batch_anchor_size: 每个批次中的锚轨迹数量
+        num_positive: 每个锚轨迹的正样本数量
+        num_negative: 每个锚轨迹的负样本数量
+        neg_threshold: 负样本的最大相似度阈值
+        top_k: 每个锚轨迹保留的候选轨迹数量
+        num_workers: 数据加载的工作进程数
+    """
+    # 加载数据
+    dataset = pkl.load(open(data_path, 'rb'))
+    similarity_matrix = pkl.load(open(similarity_matrix_path, 'rb'))
+    anchor_tids, _ = pkl.load(open(anchor_indices_path, 'rb'))
+    
+    # 创建原始数据集
+    original_dataset = StaticDataset(dataset, mat_padding_value=dataset['cpath_list'].max() + 1,
+                                   data_padding_value=0.0, gps_max_len=dataset['opath_list'].map(len).max(),
+                                   route_max_len=dataset['cpath_list'].map(len).max())
+    
+    # 创建动态批次数据集
+    dynamic_dataset = DynamicBatchDataset(
+        original_dataset=original_dataset,
+        similarity_matrix=similarity_matrix,
+        anchor_tids=anchor_tids,
+        batch_anchor_size=batch_anchor_size,
+        num_positive=num_positive,
+        num_negative=num_negative,
+        neg_threshold=neg_threshold,
+        top_k=top_k
+    )
+    
+    # 创建数据加载器
+    loader = DataLoader(
+        dynamic_dataset,
+        batch_size=1,  # 因为批次已经在数据集中组织好了
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return loader
 

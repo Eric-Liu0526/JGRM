@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from transformers import get_linear_schedule_with_warmup, AdamW
 from utils import weight_init
-from dataloader import get_train_loader, random_mask, DynamicAnchorMemory
+from dataloader import get_train_loader, random_mask, SimilarityBasedDataset
 from utils import setup_seed
 import numpy as np
 import json
@@ -15,10 +15,41 @@ from dcl import DCL
 import os
 import pickle as pkl
 
-dev_id = 1
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+# terminal: python JGRM_train.py >> logs/train-$(date "+%Y%m%d%H%M").txt
+
+dev_id = 3
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
+
+def contrastive_loss_batch(anchor_embedding, pos_embeddings_list, neg_embeddings_list, temperature):
+    """
+    anchor_embedding: [D]
+    pos_embeddings_list: [P, D]
+    neg_embeddings_list: [N, D]
+    temperature: scalar
+
+    Returns:
+        Scalar loss (单个anchor)
+    """
+    # 归一化
+    anchor_embedding = F.normalize(anchor_embedding, dim=-1)
+    pos_embeddings_list = F.normalize(pos_embeddings_list, dim=-1)
+    neg_embeddings_list = F.normalize(neg_embeddings_list, dim=-1)
+
+    # 计算相似度
+    sim_pos = torch.matmul(pos_embeddings_list, anchor_embedding) / temperature  # [P]
+    sim_neg = torch.matmul(neg_embeddings_list, anchor_embedding) / temperature  # [N]
+
+    exp_pos = torch.exp(sim_pos)  # [P]
+    exp_neg = torch.exp(sim_neg)  # [N]
+
+    denom = torch.sum(exp_pos) + torch.sum(exp_neg)  # scalar
+
+    loss = -torch.log(exp_pos / denom)  # [P]
+    loss = loss.mean()  # 平均
+
+    return loss
 
 def train(config):
 
@@ -60,6 +91,7 @@ def train(config):
 
     mask_length = config['mask_length']
     mask_prob = config['mask_prob']
+    num_positive = config['num_positive']
 
     # define seed
     setup_seed(seed)
@@ -97,29 +129,43 @@ def train(config):
     else:
         model.apply(weight_init)
 
-    train_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
-    # todo: 待整合到config中
-    anchor_indices_path = 'dataset/didi_chengdu/anchor_indices_and_densities.pkl'
-    anchor_memory = DynamicAnchorMemory(anchor_indices_path, feature_dim=256, temperature=0.07)
-    anchor_loader = DynamicAnchorMemory.get_anchor_loader(train_loader, anchor_indices_path)
-    similarity_based_loader = anchor_loader.get_similarity_based_loader(train_loader, batch_size, 3)
+    # 首先获取原始数据加载器
+    original_loader = get_train_loader(data_path, batch_size, num_worker, route_min_len, route_max_len, gps_min_len, gps_max_len, num_samples, seed)
+    
+    # 加载SpatiotemporalAnchorSelector生成的文件
+    similarity_array, similarity_rank = pkl.load(open(config['similarity_matrix_path'], 'rb'))
+    anchor_tids, _ = pkl.load(open(config['anchor_indices_path'], 'rb'))
+    
+    # 创建基于相似度的数据集
+    similarity_dataset = SimilarityBasedDataset(
+        original_dataset=original_loader.dataset,
+        similarity_rank=similarity_rank,
+        anchor_tids=anchor_tids,
+        batch_size=batch_size,
+        num_positive=config.get('num_positive', 5)
+    )
+    
+    # 创建新的数据加载器
+    train_loader = torch.utils.data.DataLoader(
+        similarity_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_worker,
+        pin_memory=True,
+        drop_last=True
+    )
+    
     print('dataset is ready.')
 
-    # epoch_step = train_loader.dataset.route_data.shape[0] // batch_size
-    epoch_1_step = anchor_loader.dataset.route_data.shape[0] // batch_size
-    epoch_2_step = similarity_based_loader.dataset.route_data.shape[0] // batch_size
-    num_1_epochs = 5
-    num_2_epochs = num_epochs - num_1_epochs
-    total_steps = epoch_1_step * num_1_epochs + epoch_2_step * num_2_epochs
+    epoch_step = len(train_loader.dataset.batches) // batch_size
+    total_steps = epoch_step * num_epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_step, num_training_steps=total_steps)
 
     for epoch in range(num_epochs):
         model.train()
-        # todo: 待整合到config中
-        epoch_loader = anchor_loader if epoch < 5 else similarity_based_loader
-        for idx, batch in enumerate(epoch_loader):
-            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid_list = batch
-            
+        for idx, batch in enumerate(train_loader):
+            gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid = batch
+
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
                                                                          vocab_size, mask_length, mask_prob)
 
@@ -129,13 +175,7 @@ def train(config):
             gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
             gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep \
                 = model(route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length)
-    
-            # 初始更新锚轨迹的向量表征
-            if epoch < 5:
-                anchor_memory.update_memory(tid_list, gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep)
-            else:
-                anchor_memory.update_memory(tid_list, gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep)
-            
+
             # flatten road_rep
             mat2flatten = {}
             y_label = []
@@ -171,6 +211,21 @@ def train(config):
             # loss_fn = DCL(temperature=0.07)
             # cl_loss = loss_fn(norm_route_traj_rep, norm_route_traj_rep)
 
+            # 计算新的对比学习loss
+            gps_cl_loss = contrastive_loss_batch(
+                anchor_embedding=gps_traj_rep[0],
+                pos_embeddings_list=gps_traj_rep[1:num_positive+1],
+                neg_embeddings_list=gps_traj_rep[num_positive+1:],
+                temperature=0.07
+            )
+
+            route_cl_loss = contrastive_loss_batch(
+                anchor_embedding=route_traj_rep[0],
+                pos_embeddings_list=route_traj_rep[1:num_positive+1],
+                neg_embeddings_list=route_traj_rep[num_positive+1:],
+                temperature=0.07
+            )
+
             # prepare label and mask_pos
             masked_pos = torch.nonzero(route_assign_mat != masked_route_assign_mat)
             masked_pos = [mat2flatten[tuple(pos.tolist())] for pos in masked_pos]
@@ -186,13 +241,15 @@ def train(config):
             masked_route_mlm_pred = route_mlm_pred[masked_pos]
             route_mlm_loss = nn.CrossEntropyLoss()(masked_route_mlm_pred, y_label)
 
-            # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS
-            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss) / 3
+            # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS + CL LOSS
+            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + gps_cl_loss + route_cl_loss) / 5
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)
             writer.add_scalar('mlm_loss/gps_mlm_loss', gps_mlm_loss, step)
             writer.add_scalar('mlm_loss/route_mlm_loss', route_mlm_loss, step)
+            writer.add_scalar('cl_loss/gps_cl_loss', gps_cl_loss, step)
+            writer.add_scalar('cl_loss/route_cl_loss', route_cl_loss, step)
             writer.add_scalar('loss', loss, step)
 
             optimizer.zero_grad()
