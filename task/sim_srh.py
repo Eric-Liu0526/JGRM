@@ -529,7 +529,7 @@ def evaluation2(seq_embedding, road_embedding, seq_model, task_data, num_nodes, 
     cleaned_split_df = task_data
 
     seq_embedding = F.normalize(seq_embedding, dim=1)
-    x = seq_embedding.cpu()
+    x = seq_embedding.cpu().numpy()
 
 
     index = faiss.IndexFlatL2(x.shape[1])
@@ -592,7 +592,7 @@ def evaluation3(seq_embedding, road_embedding, seq_model, task_data, num_nodes, 
     cleaned_split_df = task_data
 
     seq_embedding = F.normalize(seq_embedding, dim=1)
-    x = seq_embedding.cpu()
+    x = seq_embedding.cpu().numpy()
 
     index = faiss.IndexFlatL2(x.shape[1])
     index.add(x)

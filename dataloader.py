@@ -654,16 +654,16 @@ class SimilarityBasedDataset(Dataset):
 
 class DynamicBatchDataset(Dataset):
     def __init__(self, original_dataset, similarity_matrix, anchor_tids, 
-                 batch_anchor_size=32, num_positive=5, num_negative=10, 
+                 batch_size=32, num_positive=5, num_negative=10, 
                  neg_threshold=0.5, top_k=100):
         """
         动态批次划分数据集
         
         参数:
             original_dataset: 原始数据集
-            similarity_matrix: 相似度矩阵，格式为 {anchor_tid: [(traj_tid, score), ...]}
-            anchor_tids: 锚轨迹ID列表
-            batch_anchor_size: 每个批次中的锚轨迹数量
+            similarity_matrix: 相似度矩阵，格式为 (n_anchors, n_trajectories) 的numpy数组
+            anchor_tids: 锚轨迹的tid列表
+            batch_size: 每个批次的总轨迹数量（包括锚轨迹、正样本和负样本）
             num_positive: 每个锚轨迹的正样本数量
             num_negative: 每个锚轨迹的负样本数量
             neg_threshold: 负样本的最大相似度阈值
@@ -672,20 +672,25 @@ class DynamicBatchDataset(Dataset):
         self.original_dataset = original_dataset
         self.similarity_matrix = similarity_matrix
         self.anchor_tids = anchor_tids
-        self.batch_anchor_size = batch_anchor_size
+        self.batch_size = batch_size
         self.num_positive = num_positive
         self.num_negative = num_negative
         self.neg_threshold = neg_threshold
         self.top_k = top_k
         
+        # 将tids转为indices
+        self.tid_to_index = {tid: index for index, tid in enumerate(original_dataset.tid_list)}
+        # 将anchor_tids转换为indices
+        self.anchor_indices = [self.tid_to_index[tid] for tid in anchor_tids]
+        
         # 预处理：为每个锚轨迹保留top-K个候选轨迹
         self.anchor_to_topK = {}
-        for anchor_tid in self.anchor_tids:
+        for anchor_tid, anchor_idx in zip(self.anchor_tids, self.anchor_indices):
             # 获取相似度排序后的轨迹列表
-            sorted_trajs = sorted(self.similarity_matrix[anchor_tid].items(), 
-                                key=lambda x: x[1], reverse=True)
+            similarities = self.similarity_matrix[anchor_idx, :]  # 获取所有轨迹对当前锚轨迹的相似度
+            sorted_indices = np.argsort(similarities)[::-1]  # 按相似度降序排序
             # 只保留top-K个候选轨迹
-            self.anchor_to_topK[anchor_tid] = [tid for tid, _ in sorted_trajs[:top_k]]
+            self.anchor_to_topK[anchor_tid] = sorted_indices[:top_k].tolist()
         
         # 获取所有轨迹ID
         self.all_traj_ids = original_dataset.tid_list
@@ -693,6 +698,12 @@ class DynamicBatchDataset(Dataset):
         # 初始化批次列表
         self.batches = []
         self.current_epoch = 0
+        
+        # 计算每个锚轨迹需要生成的批次数量
+        # 确保每个轨迹至少被训练一次
+        total_trajectories = len(self.all_traj_ids)
+        trajectories_per_batch = self.batch_size
+        self.batches_per_anchor = (total_trajectories + len(self.anchor_tids) * trajectories_per_batch - 1) // (len(self.anchor_tids) * trajectories_per_batch)
         
         # 生成初始批次
         self._generate_batches()
@@ -705,41 +716,54 @@ class DynamicBatchDataset(Dataset):
         anchor_pool = self.anchor_tids.copy()
         np.random.shuffle(anchor_pool)
         
-        # 按批次大小划分锚轨迹
-        for i in range(0, len(anchor_pool), self.batch_anchor_size):
-            batch_anchors = anchor_pool[i:i + self.batch_anchor_size]
-            batch = []
-            
-            for anchor_tid in batch_anchors:
-                # 正样本采样（滑动窗口）
+        # 记录每个轨迹被使用的次数
+        trajectory_usage = {idx: 0 for idx in range(len(self.all_traj_ids))}
+        
+        for anchor_tid in anchor_pool:
+            anchor_idx = self.tid_to_index[anchor_tid]
+            # 为每个锚轨迹生成多个批次
+            for _ in range(self.batches_per_anchor):
+                # 正样本采样（优先选择使用次数少的轨迹）
                 pos_pool = self.anchor_to_topK[anchor_tid]
-                start_idx = self.current_epoch % (len(pos_pool) - self.num_positive + 1)
-                positives = pos_pool[start_idx:start_idx + self.num_positive]
+                # 按使用次数排序
+                pos_pool.sort(key=lambda x: trajectory_usage[x])
+                positives = pos_pool[:self.num_positive]
                 
                 # 负样本采样
-                excluded = set(positives + [anchor_tid])
+                similarities = self.similarity_matrix[anchor_idx, :]
                 # 从相似度矩阵中获取低相似度的候选轨迹
-                neg_candidates = [
-                    tid for tid, score in self.similarity_matrix[anchor_tid].items()
-                    if score < self.neg_threshold and tid not in excluded
-                ]
+                neg_candidates = np.where(similarities < self.neg_threshold)[0]
+                neg_candidates = [idx for idx in neg_candidates if idx not in positives and idx != anchor_idx]
                 
                 # 如果负样本候选不足，从全局随机采样补充
                 if len(neg_candidates) < self.num_negative:
-                    backup = [tid for tid in self.all_traj_ids if tid not in excluded]
-                    neg_candidates.extend(np.random.choice(backup, 
-                                                         size=self.num_negative - len(neg_candidates),
-                                                         replace=False))
+                    # 优先选择使用次数少的轨迹
+                    backup = [(idx, trajectory_usage[idx]) for idx in range(len(self.all_traj_ids)) 
+                             if idx not in positives and idx != anchor_idx]
+                    backup.sort(key=lambda x: x[1])
+                    backup = [x[0] for x in backup]
+                    neg_candidates.extend(backup[:self.num_negative - len(neg_candidates)])
                 
                 # 随机选择负样本
                 negatives = np.random.choice(neg_candidates, 
                                            size=self.num_negative, 
-                                           replace=False)
+                                           replace=False).tolist()
+                
+                # 更新轨迹使用次数
+                trajectory_usage[anchor_idx] += 1
+                for idx in positives:
+                    trajectory_usage[idx] += 1
+                for idx in negatives:
+                    trajectory_usage[idx] += 1
                 
                 # 将锚轨迹、正样本和负样本添加到批次中
-                batch.append((anchor_tid, positives, negatives))
-            
-            self.batches.append(batch)
+                batch = [(anchor_tid, positives, negatives)]
+                self.batches.append(batch)
+        
+        # 检查是否有轨迹未被使用
+        unused_trajectories = [idx for idx, count in trajectory_usage.items() if count == 0]
+        if unused_trajectories:
+            print(f"警告：有 {len(unused_trajectories)} 个轨迹未被使用")
     
     def set_epoch(self, epoch):
         """设置当前epoch"""
@@ -755,16 +779,16 @@ class DynamicBatchDataset(Dataset):
         batch = self.batches[idx]
         
         # 收集批次中的所有轨迹ID
-        all_tids = []
+        all_indices = []
         for anchor_tid, positives, negatives in batch:
-            all_tids.extend([anchor_tid] + positives.tolist() + negatives.tolist())
+            # 将anchor_tid转换为index
+            anchor_idx = self.tid_to_index[anchor_tid]
+            all_indices.extend([anchor_idx] + positives + negatives)
         
         # 获取所有轨迹的数据
         batch_data = []
-        for tid in all_tids:
-            # 在原始数据集中查找轨迹
-            traj_idx = self.original_dataset.tid_list.index(tid)
-            traj_data = self.original_dataset[traj_idx]
+        for idx in all_indices:
+            traj_data = self.original_dataset[idx]
             batch_data.append(traj_data)
         
         # 将数据组织成批次格式

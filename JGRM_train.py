@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from transformers import get_linear_schedule_with_warmup, AdamW
 from utils import weight_init
-from dataloader import get_train_loader, random_mask, SimilarityBasedDataset
+from dataloader import get_train_loader, random_mask, DynamicBatchDataset
 from utils import setup_seed
 import numpy as np
 import json
@@ -136,19 +136,22 @@ def train(config):
     similarity_array, similarity_rank = pkl.load(open(config['similarity_matrix_path'], 'rb'))
     anchor_tids, _ = pkl.load(open(config['anchor_indices_path'], 'rb'))
     
-    # 创建基于相似度的数据集
-    similarity_dataset = SimilarityBasedDataset(
+    # 创建动态批次数据集
+    dynamic_dataset = DynamicBatchDataset(
         original_dataset=original_loader.dataset,
-        similarity_rank=similarity_rank,
+        similarity_matrix=similarity_array,
         anchor_tids=anchor_tids,
         batch_size=batch_size,
-        num_positive=config.get('num_positive', 5)
+        num_positive=num_positive,
+        num_negative=batch_size-num_positive-1,
+        neg_threshold=config.get('neg_threshold', 0.5),
+        top_k=config.get('top_k', 100)
     )
     
     # 创建新的数据加载器
     train_loader = torch.utils.data.DataLoader(
-        similarity_dataset,
-        batch_size=batch_size,
+        dynamic_dataset,
+        batch_size=1,  # 因为批次已经在数据集中组织好了
         shuffle=False,
         num_workers=num_worker,
         pin_memory=True,
@@ -163,8 +166,18 @@ def train(config):
 
     for epoch in range(num_epochs):
         model.train()
+        # 设置当前epoch
+        train_loader.dataset.set_epoch(epoch)
+        
         for idx, batch in enumerate(train_loader):
             gps_data, gps_assign_mat, route_data, route_assign_mat, gps_length, tid = batch
+            # 由于batch_size=1，需要去掉第一个维度
+            gps_data = gps_data.squeeze(0)
+            gps_assign_mat = gps_assign_mat.squeeze(0)
+            route_data = route_data.squeeze(0)
+            route_assign_mat = route_assign_mat.squeeze(0)
+            gps_length = gps_length.squeeze(0)
+            tid = tid[0]  # 因为batch_size=1，所以tid是一个列表，取第一个元素
 
             masked_route_assign_mat, masked_gps_assign_mat = random_mask(gps_assign_mat, route_assign_mat, gps_length,
                                                                          vocab_size, mask_length, mask_prob)

@@ -1,6 +1,8 @@
 import pandas as pd
 import pickle as pkl
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # # 读取.pkl文件的pd.DataFrame，将标题和第一行内容保存为csv文件
 # def pkl_to_csv(pkl_file_path, csv_file_path):
@@ -39,10 +41,8 @@ print(od_pairs)
 # print(spatiotemporal_anchors)
 
 # 读取spatiotemporal_similarity_array.pkl
-spatiotemporal_similarity_array_path = 'dataset/didi_chengdu/spatiotemporal_similarity_array.pkl'
-spatiotemporal_similarity_array, similarity_rank = pkl.load(open(spatiotemporal_similarity_array_path, 'rb'))
-sum_ = np.sum(np.logical_and(spatiotemporal_similarity_array[0] > 0.45,spatiotemporal_similarity_array[0] < 0.56))
-print(sum_)
-# 将numpy数组写入csv文件
-# pd.DataFrame(spatiotemporal_similarity_array).to_csv('temp/spatiotemporal_similarity_array.csv', index=False)
-# pd.DataFrame(similarity_rank).to_csv('temp/similarity_rank.csv', index=False)
+
+# 将chengdu_1101_1115_data_sample10w.pkl中的数据的前10000条数据保存为pkl文件
+df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
+df = df.iloc[:10000]
+pkl.dump(df, open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w_10000.pkl', 'wb'))

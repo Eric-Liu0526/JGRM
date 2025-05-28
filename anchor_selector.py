@@ -245,6 +245,87 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         super().__init__()
         self.alpha = alpha
     
+    def extract_feature_vector(self, traj: pd.Series) -> np.ndarray:
+        """
+        提取轨迹的特征向量
+        
+        参数:
+            traj: 单条轨迹数据
+            
+        返回:
+            np.ndarray: 特征向量
+        """
+        # 行为特征
+        speed_list = traj['speed'][1:]
+        acc_list = traj['acceleration'][2:]
+        angle_list = traj['angle_delta'][2:]
+        
+        mean_speed = np.mean(speed_list)
+        std_speed = np.std(speed_list)
+        mean_acc = np.mean(acc_list)
+        std_acc = np.std(acc_list)
+        mean_angle = np.mean(angle_list)
+        std_angle = np.std(angle_list)
+        
+        # 空间特征（起终点）
+        start_lat, start_lng = traj['lat_list'][0], traj['lng_list'][0]
+        end_lat, end_lng = traj['lat_list'][-1], traj['lng_list'][-1]
+        
+        # 时间特征（转为one-hot时间段）
+        start_time = pd.to_datetime(traj['start_time'])
+        hour = start_time.hour
+        time_slot = np.zeros(24)  # 24小时
+        time_slot[hour] = 1
+        
+        # 尺度特征
+        route_len = traj['total_length']
+        duration = traj['total_time']
+        
+        # 拼接所有特征
+        feat_vec = np.concatenate([
+            [mean_speed, std_speed],
+            [mean_acc, std_acc],
+            [mean_angle, std_angle],
+            [start_lat, start_lng],
+            [end_lat, end_lng],
+            [route_len, duration],
+            time_slot
+        ])
+        
+        return feat_vec
+    
+    def calculate_similarity_matrix_vectorized(self, df: pd.DataFrame, anchor_indices: np.ndarray, 
+                                            save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        使用向量化方法计算相似度矩阵
+        
+        参数:
+            df: 包含轨迹数据的DataFrame
+            anchor_indices: 锚点轨迹的索引数组
+            save_path: 保存结果的路径
+            
+        返回:
+            Tuple[np.ndarray, np.ndarray]: 相似度矩阵和相似度排名矩阵
+        """
+        # 提取所有轨迹的特征向量
+        all_features = np.array([self.extract_feature_vector(df.iloc[i]) for i in range(len(df))])
+        anchor_features = all_features[anchor_indices]
+        
+        # 标准化特征
+        all_features = self.scaler.fit_transform(all_features)
+        anchor_features = self.scaler.transform(anchor_features)
+        
+        # 计算余弦相似度矩阵
+        similarity_matrix = np.dot(all_features, anchor_features.T)
+        
+        # 计算相似度排名
+        similarity_rank = np.argsort(similarity_matrix, axis=1)
+        
+        if save_path is not None:
+            pkl.dump((similarity_matrix, similarity_rank), open(save_path, 'wb'))
+            
+        return similarity_matrix, similarity_rank
+    
     def select_anchors(self, df: pd.DataFrame, n_anchors: int, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         基于时空分布选择锚点轨迹
@@ -267,13 +348,11 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         covered_time_buckets = set()
         anchor_gains = []
         
-        
         pbar = tqdm(total=n_anchors, desc='选择锚点轨迹')
         while len(selected_anchors) < n_anchors:
             best_tid = None
             max_gain = -1
             
-            # 使用tqdm显示内层循环进度
             for tid in tqdm(T, desc='遍历轨迹', leave=False):
                 if tid in selected_anchors:
                     continue
@@ -299,7 +378,6 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
             covered_segments.update(cpath_dict[best_tid])
             covered_time_buckets.add(time_dict[best_tid])
             
-            # 更新外层进度条
             pbar.update(1)
             
         pbar.close()
@@ -311,102 +389,6 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
             pkl.dump((selected_anchors, anchor_gains), open(save_path, 'wb'))
             
         return np.array(anchor_indices), np.array(anchor_gains)
-
-    def calculate_similarity_matrix(self, df: pd.DataFrame, anchor_indices: np.ndarray, 
-                                  lambda_weight: float = 0.5, tau: float = 2.0,
-                                  save_path: str = None) -> Dict[int, Dict[int, float]]:
-        """
-        计算锚点轨迹与所有轨迹之间的相似度矩阵
-        
-        参数:
-            df: 包含轨迹数据的DataFrame
-            anchor_indices: 锚点轨迹的索引数组
-            lambda_weight: 结构相似性的权重
-            tau: 时间衰减因子
-            save_path: 保存结果的路径
-            
-        返回:
-            Dict[int, Dict[int, float]]: 相似度矩阵，格式为 {anchor_tid: {traj_tid: similarity_score}}
-        """
-        # 获取所有轨迹ID
-        all_traj_ids = df['tid'].values
-        anchor_tids = df.iloc[anchor_indices]['tid'].values
-        
-        # 构建道路段字典和时间字典
-        cpath_dict = {tid: set(df[df['tid'] == tid]['opath_list'].iloc[0]) for tid in all_traj_ids}
-        time_dict = {tid: pd.to_datetime(df[df['tid'] == tid]['start_time'].iloc[0]).hour for tid in all_traj_ids}
-        
-        # 初始化相似度矩阵
-        similarity_matrix = {}
-        
-        # 使用tqdm显示进度
-        for anchor_tid in tqdm(anchor_tids, desc='计算相似度矩阵'):
-            Ai = cpath_dict[anchor_tid]
-            ti = time_dict[anchor_tid]
-            similarity_matrix[anchor_tid] = {}
-            
-            for traj_tid in all_traj_ids:
-                if traj_tid == anchor_tid:
-                    continue
-                    
-                Tj = cpath_dict[traj_tid]
-                tj = time_dict[traj_tid]
-                
-                # 计算结构相似性（Jaccard指数）
-                if len(Ai | Tj) == 0:
-                    jaccard = 0.0
-                else:
-                    jaccard = len(Ai & Tj) / len(Ai | Tj)
-                
-                # 计算时间相似性（指数衰减）
-                time_sim = np.exp(-abs(ti - tj) / tau)
-                
-                # 计算组合相似度
-                sim_score = lambda_weight * jaccard + (1 - lambda_weight) * time_sim
-                
-                similarity_matrix[anchor_tid][traj_tid] = sim_score
-        
-        if save_path is not None:
-            pkl.dump(similarity_matrix, open(save_path, 'wb'))
-            
-        return similarity_matrix
-    
-    def convert_similarity_matrix_to_array(self, similarity_matrix: Dict[int, Dict[int, float]], 
-                                         df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        将字典格式的相似度矩阵转换为numpy数组格式
-        
-        参数:
-            similarity_matrix: 字典格式的相似度矩阵
-            df: 包含轨迹数据的DataFrame
-            
-        返回:
-            Tuple[np.ndarray, np.ndarray]: 相似度矩阵和相似度排名矩阵
-        """
-        # 获取所有轨迹ID
-        all_traj_ids = df['tid'].values
-        anchor_tids = list(similarity_matrix.keys())
-        
-        # 创建映射字典
-        traj_id_to_idx = {tid: idx for idx, tid in enumerate(all_traj_ids)}
-        anchor_id_to_idx = {tid: idx for idx, tid in enumerate(anchor_tids)}
-        
-        # 初始化相似度矩阵
-        n_anchors = len(anchor_tids)
-        n_trajs = len(all_traj_ids)
-        similarity_array = np.zeros((n_anchors, n_trajs))
-        
-        # 填充相似度矩阵
-        for anchor_tid, traj_sims in similarity_matrix.items():
-            anchor_idx = anchor_id_to_idx[anchor_tid]
-            for traj_tid, sim_score in traj_sims.items():
-                traj_idx = traj_id_to_idx[traj_tid]
-                similarity_array[anchor_idx, traj_idx] = sim_score
-        
-        # 计算相似度排名
-        similarity_rank = np.argsort(similarity_array, axis=1)
-        
-        return similarity_array, similarity_rank
 
 def select_anchors_by_density(bandwidth=0.5, kernel='gaussian', n_anchors=1000):
     """使用基于密度的方法选择锚点"""
@@ -433,14 +415,12 @@ def select_anchors_by_spatiotemporal(alpha=0.5, n_anchors=1000, lambda_weight=0.
     anchor_indices = [df['tid'].tolist().index(tid) for tid in tids]
     
     # 计算相似度矩阵
-    similarity_matrix = anchor_selector.calculate_similarity_matrix(
-        df, anchor_indices, lambda_weight, tau, similarity_save_path
+    similarity_matrix = anchor_selector.calculate_similarity_matrix_vectorized(
+        df, anchor_indices, similarity_save_path
     )
     
     # 转换为数组格式
-    similarity_array, similarity_rank = anchor_selector.convert_similarity_matrix_to_array(
-        similarity_matrix, df
-    )
+    similarity_array, similarity_rank = similarity_matrix
     
     # 保存数组格式的相似度矩阵
     pkl.dump((similarity_array, similarity_rank), 
