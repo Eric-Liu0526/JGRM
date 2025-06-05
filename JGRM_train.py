@@ -17,10 +17,12 @@ import pickle as pkl
 
 # terminal: python JGRM_train.py >> logs/train-$(date "+%Y%m%d%H%M").txt
 
-dev_id = 3
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
+dev_id = 1
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
+print(f'Note: 加入对比学习线性衰减')
+print(f'Note: 相似度计算加入jaccard相似度')
 
 def contrastive_loss_batch(anchor_embedding, pos_embeddings_list, neg_embeddings_list, temperature):
     """
@@ -50,6 +52,19 @@ def contrastive_loss_batch(anchor_embedding, pos_embeddings_list, neg_embeddings
     loss = loss.mean()  # 平均
 
     return loss
+
+def get_cl_weight(epoch, num_epochs, initial_weight=1.0, final_weight=0.1):
+    """
+    计算对比学习loss的权重，随着epoch线性衰减
+    Args:
+        epoch: 当前epoch
+        num_epochs: 总epoch数
+        initial_weight: 初始权重
+        final_weight: 最终权重
+    Returns:
+        当前epoch的权重
+    """
+    return initial_weight - (initial_weight - final_weight) * (epoch / num_epochs)
 
 def train(config):
 
@@ -239,6 +254,9 @@ def train(config):
                 temperature=0.07
             )
 
+            # 计算当前epoch的对比学习权重
+            cl_weight = get_cl_weight(epoch, num_epochs)
+
             # prepare label and mask_pos
             masked_pos = torch.nonzero(route_assign_mat != masked_route_assign_mat)
             masked_pos = [mat2flatten[tuple(pos.tolist())] for pos in masked_pos]
@@ -255,7 +273,7 @@ def train(config):
             route_mlm_loss = nn.CrossEntropyLoss()(masked_route_mlm_pred, y_label)
 
             # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS + CL LOSS
-            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + gps_cl_loss + route_cl_loss) / 5
+            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss)) / (3 + 2*cl_weight)
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)
@@ -263,6 +281,7 @@ def train(config):
             writer.add_scalar('mlm_loss/route_mlm_loss', route_mlm_loss, step)
             writer.add_scalar('cl_loss/gps_cl_loss', gps_cl_loss, step)
             writer.add_scalar('cl_loss/route_cl_loss', route_cl_loss, step)
+            writer.add_scalar('cl_weight', cl_weight, step)
             writer.add_scalar('loss', loss, step)
 
             optimizer.zero_grad()

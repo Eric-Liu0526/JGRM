@@ -10,8 +10,8 @@ import torch
 import os
 torch.set_num_threads(5)
 
-dev_id = 3
-os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
+dev_id = 1
+os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 
 def evaluation(city, exp_path, model_name, start_time):
@@ -81,8 +81,8 @@ if __name__ == '__main__':
 
     city = 'chengdu'
    
-    exp_path = '../research/exp/JTMR_chengdu_250527223916'
-    model_name = 'JTMR_chengdu_v1_20_100000_250527223916_19.pt'
+    exp_path = '../research/exp/JTMR_chengdu_250605020150'
+    model_name = 'JTMR_chengdu_v1_20_100000_250605020150_19.pt'
 
     start_time = time.time()
     log_path = os.path.join(exp_path, 'evaluation')

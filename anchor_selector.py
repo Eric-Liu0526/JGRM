@@ -271,11 +271,12 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         start_lat, start_lng = traj['lat_list'][0], traj['lng_list'][0]
         end_lat, end_lng = traj['lat_list'][-1], traj['lng_list'][-1]
         
-        # 时间特征（转为one-hot时间段）
+        # 时间特征（转为正余弦编码）
         start_time = pd.to_datetime(traj['start_time'])
         hour = start_time.hour
-        time_slot = np.zeros(24)  # 24小时
-        time_slot[hour] = 1
+        time_sin = np.sin(hour * (2 * np.pi / 24))
+        time_cos = np.cos(hour * (2 * np.pi / 24))
+        time_slot = np.array([time_sin, time_cos])
         
         # 尺度特征
         route_len = traj['total_length']
@@ -283,12 +284,12 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         
         # 拼接所有特征
         feat_vec = np.concatenate([
-            [mean_speed, std_speed],
-            [mean_acc, std_acc],
-            [mean_angle, std_angle],
-            [start_lat, start_lng],
-            [end_lat, end_lng],
-            [route_len, duration],
+            np.array([mean_speed, std_speed]),
+            np.array([mean_acc, std_acc]),
+            np.array([mean_angle, std_angle]),
+            np.array([start_lat, start_lng]),
+            np.array([end_lat, end_lng]),
+            np.array([route_len, duration]),
             time_slot
         ])
         
@@ -297,7 +298,7 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
     def calculate_similarity_matrix_vectorized(self, df: pd.DataFrame, anchor_indices: np.ndarray, 
                                             save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        使用向量化方法计算相似度矩阵
+        使用向量化方法计算相似度矩阵，结合特征向量相似度和轨迹序列Jaccard相似度
         
         参数:
             df: 包含轨迹数据的DataFrame
@@ -316,7 +317,28 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         anchor_features = self.scaler.transform(anchor_features)
         
         # 计算余弦相似度矩阵
-        similarity_matrix = np.dot(all_features, anchor_features.T)
+        cosine_similarity = np.dot(all_features, anchor_features.T)
+        
+        # 计算轨迹序列的Jaccard相似度
+        all_paths = df['cpath_list'].values
+        anchor_paths = df.iloc[anchor_indices]['cpath_list'].values
+        
+        # 将路径列表转换为集合
+        all_path_sets = [set(path) for path in all_paths]
+        anchor_path_sets = [set(path) for path in anchor_paths]
+        
+        # 计算Jaccard相似度矩阵
+        jaccard_similarity = np.zeros((len(df), len(anchor_indices)))
+        for i in range(len(df)):
+            for j in range(len(anchor_indices)):
+                intersection = len(all_path_sets[i] & anchor_path_sets[j])
+                union = len(all_path_sets[i] | anchor_path_sets[j])
+                jaccard_similarity[i, j] = intersection / union if union > 0 else 0
+        
+        # 结合余弦相似度和Jaccard相似度（使用加权平均）
+        alpha = 0.5  # 余弦相似度权重
+        beta = 0.5   # Jaccard相似度权重
+        similarity_matrix = alpha * cosine_similarity + beta * jaccard_similarity
         
         # 计算相似度排名
         similarity_rank = np.argsort(similarity_matrix, axis=1)

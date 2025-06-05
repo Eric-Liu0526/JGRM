@@ -670,8 +670,9 @@ class DynamicBatchDataset(Dataset):
             top_k: 每个锚轨迹保留的候选轨迹数量
         """
         self.original_dataset = original_dataset
-        self.similarity_matrix = similarity_matrix
+        self.similarity_matrix = similarity_matrix.T
         self.anchor_tids = anchor_tids
+        print(f'anchor数量: {len(self.anchor_tids)}')
         self.batch_size = batch_size
         self.num_positive = num_positive
         self.num_negative = num_negative
@@ -685,7 +686,7 @@ class DynamicBatchDataset(Dataset):
         
         # 预处理：为每个锚轨迹保留top-K个候选轨迹
         self.anchor_to_topK = {}
-        for anchor_tid, anchor_idx in zip(self.anchor_tids, self.anchor_indices):
+        for anchor_idx, anchor_tid in enumerate(self.anchor_tids):
             # 获取相似度排序后的轨迹列表
             similarities = self.similarity_matrix[anchor_idx, :]  # 获取所有轨迹对当前锚轨迹的相似度
             sorted_indices = np.argsort(similarities)[::-1]  # 按相似度降序排序
@@ -719,8 +720,7 @@ class DynamicBatchDataset(Dataset):
         # 记录每个轨迹被使用的次数
         trajectory_usage = {idx: 0 for idx in range(len(self.all_traj_ids))}
         
-        for anchor_tid in anchor_pool:
-            anchor_idx = self.tid_to_index[anchor_tid]
+        for anchor_idx, anchor_tid in enumerate(anchor_pool):
             # 为每个锚轨迹生成多个批次
             for _ in range(self.batches_per_anchor):
                 # 正样本采样（优先选择使用次数少的轨迹）

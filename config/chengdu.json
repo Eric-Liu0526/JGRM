@@ -2,7 +2,7 @@
   "city": "chengdu",
   "vocab_size": 6450,
   "num_samples": 100000,
-  "data_path": "dataset/didi_chengdu/chengdu_1101_1115_data_sample10000.pkl",
+  "data_path": "dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl",
   "adj_path": "dataset/didi_chengdu/line_graph_edge_idx.npy",
   "retrain": 1,
   "save_path": "research/exp/",
