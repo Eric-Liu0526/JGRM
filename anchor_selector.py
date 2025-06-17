@@ -348,13 +348,13 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
             
         return similarity_matrix, similarity_rank
     
-    def select_anchors(self, df: pd.DataFrame, n_anchors: int, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
+    def select_anchors(self, df: pd.DataFrame, min_coverage: float = 0.95, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
         """
-        基于时空分布选择锚点轨迹
+        基于时空分布选择锚点轨迹，直到达到指定的覆盖量
         
         参数:
             df: 包含轨迹数据的DataFrame
-            n_anchors: 需要选择的锚轨迹数量
+            min_coverage: 最小覆盖率要求，范围[0,1]
             save_path: 保存结果的路径
             
         返回:
@@ -365,13 +365,19 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
         cpath_dict = {tid: set(df[df['tid'] == tid]['opath_list'].iloc[0]) for tid in T}  # 轨迹ID到道路段集合的映射
         time_dict = {tid: pd.to_datetime(df[df['tid'] == tid]['start_time'].iloc[0]).hour for tid in T}  # 轨迹ID到时间段的映射
         
+        # 计算总道路段数量
+        all_segments = set()
+        for seg_set in cpath_dict.values():
+            all_segments.update(seg_set)
+        total_segments = len(all_segments)
+        
         selected_anchors = []
         covered_segments = set()
         covered_time_buckets = set()
         anchor_gains = []
         
-        pbar = tqdm(total=n_anchors, desc='选择锚点轨迹')
-        while len(selected_anchors) < n_anchors:
+        pbar = tqdm(desc='选择锚点轨迹')
+        while True:
             best_tid = None
             max_gain = -1
             
@@ -400,8 +406,15 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
             covered_segments.update(cpath_dict[best_tid])
             covered_time_buckets.add(time_dict[best_tid])
             
+            # 计算当前覆盖率
+            current_coverage = len(covered_segments) / total_segments
             pbar.update(1)
+            pbar.set_description(f'选择锚点轨迹 (覆盖率: {current_coverage:.2%})')
             
+            # 检查是否达到目标覆盖率
+            if current_coverage >= min_coverage:
+                break
+        
         pbar.close()
                 
         # 将tid转换为索引
@@ -414,14 +427,14 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
 
 def select_anchors_by_density(bandwidth=0.5, kernel='gaussian', n_anchors=1000):
     """使用基于密度的方法选择锚点"""
-    df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
+    df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_data.pkl', 'rb'))
     save_path = 'dataset/didi_chengdu/anchor_indices_and_densities.pkl'
     anchor_selector = DensityBasedAnchorSelector(bandwidth=bandwidth, kernel=kernel)
     anchor_selector.fit(df)
     anchor_indices, anchor_densities = anchor_selector.select_anchors(df, n_anchors, save_path)
     return anchor_indices, anchor_densities
 
-def select_anchors_by_spatiotemporal(alpha=0.5, n_anchors=1000, lambda_weight=0.5, tau=2.0):
+def select_anchors_by_spatiotemporal(alpha=0.5, min_coverage=0.95, lambda_weight=0.5, tau=2.0):
     """使用基于时空分布的方法选择锚点"""
     df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
     df = df.reset_index(drop=True)
@@ -491,7 +504,7 @@ if __name__ == "__main__":
     # select_anchors_by_density(0.5, 'gaussian', 1024)
     
     # 使用基于时空分布的方法选择锚点
-    select_anchors_by_spatiotemporal(alpha=0.5, n_anchors=1024, lambda_weight=0.5, tau=2.0)
+    select_anchors_by_spatiotemporal(alpha=0.5, min_coverage=1, lambda_weight=0.5, tau=2.0)
     
     # 计算相似度矩阵
     # cal_similarity_matrix()

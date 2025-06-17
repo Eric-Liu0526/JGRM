@@ -717,6 +717,15 @@ class DynamicBatchDataset(Dataset):
         anchor_pool = self.anchor_tids.copy()
         np.random.shuffle(anchor_pool)
         
+        # 纯用锚点构建批次
+        num_anchor_batch = len(anchor_pool) // self.batch_size
+        for i in range(num_anchor_batch):
+            # 获取锚轨迹索引
+            anchors = anchor_pool[i * self.batch_size:(i + 1) * self.batch_size]
+            indices = [self.tid_to_index[anchor] for anchor in anchors]
+            batch = [(anchors[0], indices[1:self.num_positive + 1], indices[self.num_positive + 1:])]
+            self.batches.append(batch)
+
         # 记录每个轨迹被使用的次数
         trajectory_usage = {idx: 0 for idx in range(len(self.all_traj_ids))}
         
