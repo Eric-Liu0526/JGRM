@@ -17,12 +17,17 @@ import pickle as pkl
 
 # terminal: python JGRM_train.py >> logs/train-$(date "+%Y%m%d%H%M").txt
 
-dev_id = 1
+dev_id = 0
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
-print(f'Note: 加入对比学习线性衰减')
-print(f'Note: 相似度计算加入jaccard相似度')
+print(f'Note: v3.0.6')
+print(f'Note: 训练数据chengdu_1101_1115_data_sample10w')
+print(f'Note: 增加路段序列编码注意力机制')
+print(f'Note: 相似度从加权平均改为乘积')
+print(f'Note: 增加gps和route的joint的对比学习')
+print(f'Note: 去除对比学习权重衰减')
+
 
 def contrastive_loss_batch(anchor_embedding, pos_embeddings_list, neg_embeddings_list, temperature):
     """
@@ -254,6 +259,20 @@ def train(config):
                 temperature=0.07
             )
 
+            gps_road_joint_cl_loss = contrastive_loss_batch(
+                anchor_embedding=gps_road_joint_rep[0],
+                pos_embeddings_list=gps_road_joint_rep[1:num_positive+1],
+                neg_embeddings_list=gps_road_joint_rep[num_positive+1:],
+                temperature=0.07
+            )
+
+            route_road_joint_cl_loss = contrastive_loss_batch(
+                anchor_embedding=route_road_joint_rep[0],
+                pos_embeddings_list=route_road_joint_rep[1:num_positive+1],
+                neg_embeddings_list=route_road_joint_rep[num_positive+1:],
+                temperature=0.07
+            )
+
             # 计算当前epoch的对比学习权重
             cl_weight = get_cl_weight(epoch, num_epochs)
 
@@ -273,7 +292,9 @@ def train(config):
             route_mlm_loss = nn.CrossEntropyLoss()(masked_route_mlm_pred, y_label)
 
             # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS + CL LOSS
-            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss)) / (3 + 2*cl_weight)
+            # loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss)) / (3 + 2*cl_weight)
+            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss + gps_road_joint_cl_loss + route_road_joint_cl_loss)) / (3 + 2*cl_weight)
+            # loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss + gps_road_joint_cl_loss + route_road_joint_cl_loss)) / (3 + 4)
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)

@@ -9,6 +9,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from tqdm import tqdm
+import networkx as nx
 
 class BaseAnchorSelector(ABC):
     """锚点选择器的基类"""
@@ -336,9 +337,9 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
                 jaccard_similarity[i, j] = intersection / union if union > 0 else 0
         
         # 结合余弦相似度和Jaccard相似度（使用加权平均）
-        alpha = 0.5  # 余弦相似度权重
-        beta = 0.5   # Jaccard相似度权重
-        similarity_matrix = alpha * cosine_similarity + beta * jaccard_similarity
+        # alpha = 0.5  # 余弦相似度权重
+        # beta = 0.5   # Jaccard相似度权重
+        similarity_matrix = cosine_similarity * jaccard_similarity
         
         # 计算相似度排名
         similarity_rank = np.argsort(similarity_matrix, axis=1)
@@ -424,10 +425,153 @@ class SpatiotemporalAnchorSelector(BaseAnchorSelector):
             pkl.dump((selected_anchors, anchor_gains), open(save_path, 'wb'))
             
         return np.array(anchor_indices), np.array(anchor_gains)
+    
+class RoadAnchorSelector(BaseAnchorSelector):
+    """路段锚点选择器"""
+    
+    def __init__(self):
+        super().__init__()
+        self.transition_prob_mat = np.load('dataset/didi_chengdu/transition_prob_mat.npy')
+        self.edge_features = pd.read_csv('dataset/didi_chengdu/edge_features.csv')
+        self.line_graph_edge_idx = np.load('dataset/didi_chengdu/line_graph_edge_idx.npy')
+        self.traj_df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
+
+    def select_anchors(self, df: pd.DataFrame = None, n_anchors: int = None, save_path: str = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        实现基类的抽象方法，选择路段锚点
+        
+        参数:
+            df: 不使用，保持接口一致
+            n_anchors: 不使用，保持接口一致
+            save_path: 保存结果的路径
+            
+        返回:
+            Tuple[np.ndarray, np.ndarray]: 返回锚点索引和对应的得分
+        """
+        anchor_indices = self.select_road_anchors()
+        if save_path is not None:
+            pkl.dump(anchor_indices, open(save_path, 'wb'))
+        return anchor_indices, np.ones_like(anchor_indices)  # 返回等权重得分
+
+    def select_road_anchors(self):
+        """
+        构建有向路网拓扑图，基于最小点覆盖贪心选择路段锚点。
+        返回：
+            anchor_indices: 被选为锚点的路段索引列表
+            anchor_scores: 对应的出度权重和
+        """
+        # 1. 构建有向图
+        G = nx.DiGraph()
+        num_nodes = self.transition_prob_mat.shape[0]
+        for i in range(num_nodes):
+            for j in range(num_nodes):
+                prob = self.transition_prob_mat[i, j]
+                if prob > 0:
+                    G.add_edge(i, j, weight=prob)
+        
+        # 2. 计算每个节点的出度权重和
+        out_weight_sum = {node: sum([d['weight'] for _, _, d in G.out_edges(node, data=True)]) for node in G.nodes}
+        
+        # 3. 贪心选择锚点
+        candidate_nodes = set(G.nodes)
+        covered_nodes = set()
+        anchor_indices = []
+        # anchor_scores = []
+        
+        while candidate_nodes:
+            # 只在候选节点中选最大出度权重和
+            node_scores = {node: out_weight_sum[node] for node in candidate_nodes}
+            best_node = max(node_scores, key=node_scores.get)
+            anchor_indices.append(best_node)
+            # anchor_scores.append(out_weight_sum[best_node])
+            # 其一阶邻居（出边指向的节点）
+            neighbors = set([v for _, v in G.out_edges(best_node)])
+            # 移除自身和一阶邻居
+            remove_nodes = neighbors | {best_node}
+            candidate_nodes -= remove_nodes
+            covered_nodes |= remove_nodes
+        
+        return np.array(anchor_indices)
+    
+    def link_enhancement(self, anchor_indices):
+        """
+        对锚点及其二阶邻居进行连边，生成新的line_graph_edge_idx
+        
+        参数:
+            anchor_indices: 锚点索引数组
+            
+        返回:
+            new_edge_idx: 新的line_graph_edge_idx
+        """
+        import networkx as nx
+        
+        # 1. 构建原始有向图
+        G = nx.DiGraph()
+        num_nodes = self.transition_prob_mat.shape[0]
+        for i in range(num_nodes):
+            for j in range(num_nodes):
+                prob = self.transition_prob_mat[i, j]
+                if prob > 0:
+                    G.add_edge(i, j, weight=prob)
+        
+        # 2. 获取每个锚点的二阶邻居
+        second_order_neighbors = {}
+        for anchor in anchor_indices:
+            # 获取一阶邻居
+            first_order = set([v for _, v in G.out_edges(anchor)])
+            # 获取二阶邻居
+            second_order = set()
+            for neighbor in first_order:
+                second_order.update([v for _, v in G.out_edges(neighbor)])
+            second_order_neighbors[anchor] = second_order
+        
+        # 3. 构建新的边集合
+        new_edges = list()
+        starts = list()
+        ends = list()
+        
+        # 3.1 保留原始边
+        for i, j in G.edges():
+            starts.append(i)
+            ends.append(j)
+        
+        # 3.2 添加锚点之间的边
+        # for i in range(len(anchor_indices)):
+        #     for j in range(i + 1, len(anchor_indices)):
+        #         starts.append(anchor_indices[i])
+        
+        # 3.3 添加锚点与其二阶邻居之间的边
+        for anchor in anchor_indices:
+            for neighbor in second_order_neighbors[anchor]:
+                starts.append(anchor)
+                ends.append(neighbor)
+                # new_edges.add((anchor, neighbor))
+                # new_edges.add((neighbor, anchor))
+        
+        starts = np.array(starts)
+        ends = np.array(ends)
+        new_edges = np.stack((starts, ends), axis=0)
+
+        # 4. 转换为numpy数组格式
+        new_edge_idx = np.array(new_edges)
+        
+        # 5. 保存新的边索引
+        np.save('dataset/didi_chengdu/enhanced_line_graph_edge_idx.npy', new_edge_idx)
+        
+        return new_edge_idx
+    
+    def enhance_road_anchors(self):
+        """
+        对路段锚点进行链接增强
+        返回：
+            anchor_indices: 被选为锚点的路段索引列表
+        """
+        anchor_indices = self.select_road_anchors()
+        new_edge_idx = self.link_enhancement(anchor_indices)
 
 def select_anchors_by_density(bandwidth=0.5, kernel='gaussian', n_anchors=1000):
     """使用基于密度的方法选择锚点"""
-    df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_data.pkl', 'rb'))
+    df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w.pkl', 'rb'))
     save_path = 'dataset/didi_chengdu/anchor_indices_and_densities.pkl'
     anchor_selector = DensityBasedAnchorSelector(bandwidth=bandwidth, kernel=kernel)
     anchor_selector.fit(df)
@@ -443,11 +587,11 @@ def select_anchors_by_spatiotemporal(alpha=0.5, min_coverage=0.95, lambda_weight
     
     # 选择锚点
     anchor_selector = SpatiotemporalAnchorSelector(alpha=alpha)
-    # anchor_indices, anchor_gains = anchor_selector.select_anchors(df, n_anchors, save_path)
+    anchor_indices, anchor_gains = anchor_selector.select_anchors(df, min_coverage, save_path)
     # 直接读取pkl文件
-    tids, anchor_gains = pkl.load(open(save_path, 'rb'))
+    # tids, anchor_gains = pkl.load(open(save_path, 'rb'))
     # 将tids转换为索引
-    anchor_indices = [df['tid'].tolist().index(tid) for tid in tids]
+    # anchor_indices = [df['tid'].tolist().index(tid) for tid in tids]
     
     # 计算相似度矩阵
     similarity_matrix = anchor_selector.calculate_similarity_matrix_vectorized(
@@ -508,3 +652,9 @@ if __name__ == "__main__":
     
     # 计算相似度矩阵
     # cal_similarity_matrix()
+
+    '''
+    # 使用路段锚点选择器
+    road_anchor_selector = RoadAnchorSelector()
+    road_anchor_selector.enhance_road_anchors()
+    '''

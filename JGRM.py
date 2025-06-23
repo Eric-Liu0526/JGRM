@@ -57,6 +57,8 @@ class JGRMModel(BaseModel):
         self.image_queue = nn.functional.normalize(self.gps_queue, dim=0)
         self.text_queue = nn.functional.normalize(self.route_queue, dim=0)
 
+        self.route_attn_fc = nn.Linear(hidden_size, 1)
+
     def encode_graph(self, drop_rate=0.):
         node_emb = self.node_embedding.weight
         edge_index = dropout_adj(self.edge_index, p=drop_rate)[0]
@@ -107,8 +109,19 @@ class JGRMModel(BaseModel):
 
         route_unpooled = route_enc * pool_mask.repeat(1, 1, route_enc.shape[-1]) # (batch_size,max_len,feat_num)
 
+        '''
         # 对于单路段mask，可能存在整个route都被mask掉的情况，此时pool_mask.sum(1)中有0值，令其最小值为1防止0除
         route_pooled = route_unpooled.sum(1) / pool_mask.sum(1).clamp(min=1) # (batch_size, feat_num)
+        '''
+
+        # '''
+        # 计算注意力分数
+        attn_scores = self.route_attn_fc(route_unpooled).squeeze(-1)  # (batch_size, max_len)
+        attn_scores = attn_scores.masked_fill(pool_mask.squeeze(-1) == 0, float('-inf'))  # mask掉padding
+        attn_weights = torch.softmax(attn_scores, dim=1)  # (batch_size, max_len)
+        attn_weights = attn_weights.unsqueeze(-1)  # (batch_size, max_len, 1)
+        route_pooled = (route_unpooled * attn_weights).sum(1)  # (batch_size, feat_num)
+        # '''
 
         return route_unpooled, route_pooled
 

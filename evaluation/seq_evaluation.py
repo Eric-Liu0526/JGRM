@@ -14,7 +14,7 @@ import torch
 import os
 torch.set_num_threads(5)
 
-dev_id = 0
+dev_id = 1
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 
@@ -72,7 +72,7 @@ def evaluation(city, exp_path, model_name, start_time):
 
     # task 3
     time_est.evaluation(seq_embedding, test_seq_data, num_nodes)
-
+    # '''
     route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, dataset = prepare_data(
         test_seq_data, route_min_len, route_max_len, gps_min_len, gps_max_len)
     test_data = (
@@ -94,7 +94,7 @@ def evaluation(city, exp_path, model_name, start_time):
 
     sim_srh.evaluation3(seq_embedding, None, seq_model, test_seq_data, num_nodes, trans_mat, feature_df, geometry_df,
                         detour_rate=0.3, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
-
+# '''
     end_time = time.time()
     print("cost time : {:.2f} s".format(end_time - start_time))
 

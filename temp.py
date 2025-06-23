@@ -47,7 +47,7 @@ print(od_pairs)
 # df = df.iloc[:10000]
 # pkl.dump(df, open('dataset/didi_chengdu/chengdu_1101_1115_data_sample10w_10000.pkl', 'wb'))
 
-# '''
+'''
 def print_anchor_info(anchor_file_path):
     """
     读取锚点文件并打印锚点数量
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # 读取相似度矩阵文件
     print("\n相似度矩阵信息:")
     #print_anchor_info('dataset/didi_chengdu/spatiotemporal_similarity_array.pkl') 
-    # '''
+'''
 
 '''
 # 读取轨迹数据文件
@@ -133,3 +133,26 @@ print(len(df))
 # # 查看dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl中的数据
 # df = pkl.load(open('dataset/didi_chengdu/chengdu_1101_1115_data_seq_evaluation.pkl', 'rb'))
 # print(df)
+
+# '''
+# 查看dataset/didi_chengdu/transition_prob_mat.npy
+transition_prob_mat = np.load('dataset/didi_chengdu/transition_prob_mat.npy')
+# 输出非0的值数量
+print(np.count_nonzero(transition_prob_mat))
+# print(transition_prob_mat)
+
+# 查看dataset/didi_chengdu/line_graph_edge_idx.npy
+line_graph_edge_idx = np.load('dataset/didi_chengdu/line_graph_edge_idx.npy')
+# print(line_graph_edge_idx)
+
+# 遍历路段连边，检查是否涵盖所有转移概率
+num_un_covered = 0
+for i in range(len(line_graph_edge_idx[0])):
+    start_node = line_graph_edge_idx[0][i]
+    end_node = line_graph_edge_idx[1][i]
+    if transition_prob_mat[start_node, end_node] == 0:
+        # print(f"路段连边{i}未涵盖转移概率: {start_node} -> {end_node}")
+        num_un_covered += 1
+print(f"未涵盖转移概率的路段连边数量: {num_un_covered}")
+
+# '''
