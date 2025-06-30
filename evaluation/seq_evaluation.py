@@ -14,7 +14,7 @@ import torch
 import os
 torch.set_num_threads(5)
 
-dev_id = 1
+dev_id = 0
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
 torch.cuda.set_device(dev_id)
 
@@ -101,11 +101,13 @@ def evaluation(city, exp_path, model_name, start_time):
 if __name__ == '__main__':
 
     city = 'chengdu'
-    exp_path = '../research/exp/JTMR_chengdu_250605020150'
-    model_name = 'JTMR_chengdu_v1_20_100000_250605020150_19.pt'
+    exp_path = '../research/exp/JTMR_chengdu_250625211918'
+    model_name = 'JTMR_chengdu_v1_80_6457_250625211918_79.pt'
 
     start_time = time.time()
     log_path = os.path.join(exp_path, 'evaluation')
+    print(f'exp_path: {exp_path}')
+    print(f'model_name: {model_name}')
     # sys.stdout = Logger(log_path, start_time, stream=sys.stdout)  # record log
     # sys.stderr = Logger(log_path, start_time, stream=sys.stderr)  # record error
 

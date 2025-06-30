@@ -23,10 +23,11 @@ torch.cuda.set_device(dev_id)
 torch.set_num_threads(10)
 print(f'Note: v3.0.6')
 print(f'Note: 训练数据chengdu_1101_1115_data_sample10w')
-print(f'Note: 增加路段序列编码注意力机制')
-print(f'Note: 相似度从加权平均改为乘积')
-print(f'Note: 增加gps和route的joint的对比学习')
-print(f'Note: 去除对比学习权重衰减')
+print(f'Note: 去除gps和route的joint的对比学习')
+print(f'Note: 保留对比学习权重衰减')
+# print(f'Note: GAT引入转移概率矩阵作为先验')
+# print(f'Note: 使用路段锚点增强的line graph')
+print(f'Note: 使用强融合GAT')
 
 
 def contrastive_loss_batch(anchor_embedding, pos_embeddings_list, neg_embeddings_list, temperature):
@@ -79,6 +80,7 @@ def train(config):
     num_samples = config['num_samples']
     data_path = config['data_path']
     adj_path = config['adj_path']
+    edge_weight_path = config['edge_weight_path']
     retrain = config['retrain']
     save_path = config['save_path']
 
@@ -118,8 +120,9 @@ def train(config):
 
     # define model, parmeters and optimizer
     edge_index = np.load(adj_path)
+    edge_weight = np.load(edge_weight_path)
     model = JGRMModel(vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num,
-                      gps_embed_size, route_embed_size, hidden_size, edge_index, drop_edge_rate, drop_route_rate, drop_road_rate, mode='x').cuda()
+                      gps_embed_size, route_embed_size, hidden_size, edge_index, edge_weight, drop_edge_rate, drop_route_rate, drop_road_rate, mode='x').cuda()
     # Modify it to your own directory
     init_road_emb = torch.load('dataset/didi_{}/init_w2v_road_emb.pt'.format(city), map_location='cuda:{}'.format(dev_id))
     model.node_embedding.weight = torch.nn.Parameter(init_road_emb['init_road_embd'])
@@ -245,6 +248,7 @@ def train(config):
             # cl_loss = loss_fn(norm_route_traj_rep, norm_route_traj_rep)
 
             # 计算新的对比学习loss
+            
             gps_cl_loss = contrastive_loss_batch(
                 anchor_embedding=gps_traj_rep[0],
                 pos_embeddings_list=gps_traj_rep[1:num_positive+1],
@@ -258,7 +262,7 @@ def train(config):
                 neg_embeddings_list=route_traj_rep[num_positive+1:],
                 temperature=0.07
             )
-
+            '''
             gps_road_joint_cl_loss = contrastive_loss_batch(
                 anchor_embedding=gps_road_joint_rep[0],
                 pos_embeddings_list=gps_road_joint_rep[1:num_positive+1],
@@ -272,7 +276,7 @@ def train(config):
                 neg_embeddings_list=route_road_joint_rep[num_positive+1:],
                 temperature=0.07
             )
-
+            '''
             # 计算当前epoch的对比学习权重
             cl_weight = get_cl_weight(epoch, num_epochs)
 
@@ -292,8 +296,8 @@ def train(config):
             route_mlm_loss = nn.CrossEntropyLoss()(masked_route_mlm_pred, y_label)
 
             # MLM 1 LOSS + MLM 2 LOSS + GRM LOSS + CL LOSS
-            # loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss)) / (3 + 2*cl_weight)
-            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss + gps_road_joint_cl_loss + route_road_joint_cl_loss)) / (3 + 2*cl_weight)
+            loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss)) / (3 + 2*cl_weight)
+            # loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss + gps_road_joint_cl_loss + route_road_joint_cl_loss)) / (3 + 2*cl_weight)
             # loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss + cl_weight*(gps_cl_loss + route_cl_loss + gps_road_joint_cl_loss + route_road_joint_cl_loss)) / (3 + 4)
 
             step = epoch_step*epoch + idx

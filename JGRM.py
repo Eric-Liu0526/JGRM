@@ -6,11 +6,12 @@ from basemodel import BaseModel
 import torch.nn.utils.rnn as rnn_utils
 
 class JGRMModel(BaseModel):
-    def __init__(self, vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num, gps_embed_size, route_embed_size, hidden_size, edge_index, drop_edge_rate, drop_route_rate, drop_road_rate, mode='p'):
+    def __init__(self, vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num, gps_embed_size, route_embed_size, hidden_size, edge_index, edge_weight, drop_edge_rate, drop_route_rate, drop_road_rate, mode='p'):
         super(JGRMModel, self).__init__()
 
         self.vocab_size = vocab_size # 路段数量
         self.edge_index = torch.tensor(edge_index).cuda()
+        self.edge_weight = torch.tensor(edge_weight, dtype=torch.float32).cuda()
         self.mode = mode
         self.drop_edge_rate = drop_edge_rate
 
@@ -25,7 +26,8 @@ class JGRMModel(BaseModel):
         self.delta_embedding = IntervalEmbedding(100, route_embed_size)     # -1 是mask位
 
         # route encoding
-        self.graph_encoder = GraphEncoder(road_embed_size, route_embed_size)
+        self.graph_encoder = TransferGATEncoder(road_embed_size, route_embed_size, transfer_prob_matrix=self.edge_weight, lambda_weight=0.5)
+        # self.graph_encoder = GraphEncoder(road_embed_size, route_embed_size)
         self.position_embedding1 = nn.Embedding(route_max_len, route_embed_size)
         self.fc1 = nn.Linear(route_embed_size, hidden_size) # route fuse time ffn
         self.route_encoder = TransformerModel(hidden_size, 8, hidden_size, 4, drop_route_rate)
@@ -61,8 +63,9 @@ class JGRMModel(BaseModel):
 
     def encode_graph(self, drop_rate=0.):
         node_emb = self.node_embedding.weight
-        edge_index = dropout_adj(self.edge_index, p=drop_rate)[0]
-        node_enc = self.graph_encoder(node_emb, edge_index)
+        # edge_index = dropout_adj(self.edge_index, p=drop_rate)[0]
+        # node_enc = self.graph_encoder(node_emb, self.edge_index, self.edge_weight)
+        node_enc = self.graph_encoder(node_emb, self.edge_index)
         return node_enc
 
     def encode_route(self, route_data, route_assign_mat, masked_route_assign_mat):
@@ -269,6 +272,42 @@ class GraphEncoder(nn.Module):
         x = self.activation(self.layer2(x, edge_index))
         return x
 
+class TransferGATEncoder(nn.Module):
+    def __init__(self, input_size, output_size, transfer_prob_matrix=None, lambda_weight=0.5):
+        """
+        Args:
+            input_size: 输入特征维度
+            output_size: 输出特征维度
+            transfer_prob_matrix: 预计算的路段转移概率矩阵 [num_nodes, num_nodes]
+            lambda_weight: 转移概率的融合权重 (0-1)
+        """
+        super(TransferGATEncoder, self).__init__()
+        self.layer1 = GATConv(input_size, output_size)
+        self.layer2 = GATConv(input_size, output_size)
+        self.activation = nn.ReLU()
+        
+        # 注册转移概率为可优化参数（若未提供则初始化为零矩阵）
+        if transfer_prob_matrix is not None:
+            self.register_buffer('transfer_prob', torch.log(transfer_prob_matrix + 1e-6))
+        else:
+            self.register_buffer('transfer_prob', torch.zeros(1, 1))
+            
+        self.lambda_weight = lambda_weight
+
+    def forward(self, x, edge_index):
+        # 第一层：基础GAT + 转移概率偏置
+        h = self.layer1(x, edge_index)
+        
+        # 如果是PyG的GATConv，需要手动注入转移概率到注意力机制
+        if hasattr(self.layer1, 'attention_weights'):  # 检查是否是自定义的GAT实现
+            self.layer1.attention_weights += self.lambda_weight * self.transfer_prob[edge_index[0], edge_index[1]]
+        
+        h = self.activation(h)
+        
+        # 第二层：纯GAT
+        h = self.layer2(h, edge_index)
+        return self.activation(h)
+
 class TransformerModel(nn.Module):  # vanilla transformer
     def __init__(self, input_size, num_heads, hidden_size, num_layers, dropout=0.3):
         super(TransformerModel, self).__init__()
@@ -290,3 +329,71 @@ class IntervalEmbedding(nn.Module):
         logit = self.activation(self.layer1(x.unsqueeze(-1)))
         output = logit @ self.emb.weight
         return output
+
+class StrongTransferGAT(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_nodes, 
+                 alpha=0.1, lambda_weight=0.7, heads=1):
+        """
+        Args:
+            input_size: 输入特征维度
+            hidden_size: 隐藏层维度
+            output_size: 输出特征维度
+            num_nodes: 路段总数（用于初始化概率矩阵）
+            alpha: 转移概率平滑系数
+            lambda_weight: 转移概率初始权重
+            heads: GAT多头注意力数
+        """
+        super(StrongTransferGAT, self).__init__()
+        self.num_nodes = num_nodes
+        self.alpha = torch.tensor(alpha).cuda()
+        self.lambda_weight = nn.Parameter(torch.tensor(lambda_weight).cuda())
+        
+        # 可学习的转移概率矩阵（初始化为均匀分布）
+        self.transfer_embed = nn.Parameter(torch.randn(num_nodes, num_nodes).cuda())
+        self.transfer_prob = torch.softmax(self.transfer_embed, dim=1).cuda()
+        
+        # GAT层定义
+        self.gat1 = GATConv(input_size, hidden_size, heads=heads)
+        self.gat2 = GATConv(hidden_size * heads, output_size)
+        
+        # 残差连接层
+        self.residual = nn.Linear(input_size, hidden_size * heads)
+        
+    def update_transfer_prob(self, trajectories):
+        """动态更新转移概率矩阵（每batch或epoch调用）"""
+        with torch.no_grad():
+            # 统计当前batch的转移次数
+            count = torch.zeros(self.num_nodes, self.num_nodes, 
+                              device=self.transfer_embed.device)
+            for traj in trajectories:
+                for i in range(len(traj)-1):
+                    u, v = traj[i], traj[i+1]
+                    count[u][v] += 1
+            
+            # 平滑并归一化
+            batch_prob = (count + self.alpha) / (count.sum(dim=1, keepdim=True) + self.alpha * self.num_nodes)
+            
+            # 滑动平均更新
+            self.transfer_prob = 0.9 * self.transfer_prob + 0.1 * batch_prob
+            self.transfer_embed.data = torch.log(self.transfer_prob + 1e-6)
+    
+    def forward(self, x, edge_index):
+        # 强融合：用转移概率直接加权邻居特征
+        src, dst = edge_index
+        transfer_prob = torch.softmax(self.transfer_embed, dim=1)
+        transfer_prob = transfer_prob.to(edge_index.device)
+        weighted_features = transfer_prob[src, dst].unsqueeze(1) * x[dst]
+        aggregated = scatter_sum(weighted_features, src, dim=0, dim_size=x.size(0))
+        
+        # 残差连接 + GAT
+        h_res = self.residual(x)
+        h_gat = self.gat1(x, edge_index)
+        h = F.relu(h_res + self.lambda_weight * aggregated + h_gat)
+        
+        # 第二层GAT
+        return self.gat2(h, edge_index)
+
+    def get_attention_scores(self, x, edge_index):
+        """可视化注意力与转移概率的关系"""
+        _, attn_weights = self.gat1(x, edge_index, return_attention_weights=True)
+        return attn_weights, self.transfer_prob[edge_index[0], edge_index[1]]
